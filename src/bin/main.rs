@@ -30,8 +30,8 @@ use reterminal_e100x::spectra6::Spectra6Color;
 
 use nalgebra::base::Vector6;
 use nalgebra::geometry::Point3;
-use epd_dither::decomposer6c::{Decomposer6C, Decomposer6CAxisStrategy};
-use epd_dither::noise::interleaved_gradient_noise;
+//use epd_dither::decomposer6c::{Decomposer6C, Decomposer6CAxisStrategy};
+//use epd_dither::noise::interleaved_gradient_noise;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -390,6 +390,7 @@ async fn main(spawner: Spawner) -> ! {
         &mut embassy_time::Delay,
     );
 
+    /*
     println!("Creating decomposer");
     let decomposer = Decomposer6C::new(&PALETTE).unwrap();
 
@@ -411,6 +412,19 @@ async fn main(spawner: Spawner) -> ! {
     let end_dither = esp_hal::xtensa_lx::timer::get_cycle_count();
     let dither_duration_cycles = end_dither.wrapping_sub(start_dither);
     println!("Duration: {:?} seconds", (dither_duration_cycles as f32)/(240_000_000.0));
+    */
+    let data = data.map(|color| {
+        let color_pt = color_to_point(color);
+        let distances = PALETTE.iter().enumerate().map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
+        let best = distances.reduce(|a,b| {
+            if a.1 < b.1 {
+                a
+            } else {
+                b
+            }
+        }).unwrap();
+        PALETTE_COLORS[best.0]
+    });
 
     println!("Reset");
     let epd = epd.reset(&mut embassy_time::Delay).await.unwrap();
