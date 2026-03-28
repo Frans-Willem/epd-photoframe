@@ -229,7 +229,7 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
         .reader();
     println!("Reading body");
 
-    let mut body = alloc::vec::Vec::new();
+    let mut body = alloc::vec::Vec::with_capacity(5*1024*1024);
     loop {
         let chunk = response.fill_buf().await.unwrap();
         if chunk.is_empty() {
@@ -343,7 +343,6 @@ async fn main(spawner: Spawner) -> ! {
         )))
         .unwrap();
 
-    /*
     let radio_init = RADIO_CONTROLLER
         .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
     let (mut wifi_controller, interfaces) =
@@ -383,8 +382,26 @@ async fn main(spawner: Spawner) -> ! {
     println!("Decode PNG");
     let (header, data) = png_decoder::decode(png_data.as_slice()).unwrap();
     println!("Header: {:?}", header);
-    let data = data.into_iter();
-    */
+    let data = (0..(1600 * 1200)).map(|idx| {
+        let x = idx % 600;
+        let y = idx / 600;
+        let half = y / 1600;
+        let y = y % 1600;
+        let x = if half > 0 { x + 600 } else { x };
+        data[(y * 1200) + x]
+    });
+    let data = data.map(|color| {
+        let color_pt = color_to_point(color);
+        let distances = PALETTE.iter().enumerate().map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
+        let best = distances.reduce(|a,b| {
+            if a.1 < b.1 {
+                a
+            } else {
+                b
+            }
+        }).unwrap();
+        PALETTE_COLORS[best.0]
+    });
 
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
@@ -426,56 +443,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     /*
-    println!("Creating decomposer");
-    let decomposer = Decomposer6C::new(&PALETTE).unwrap();
-
-    println!("Setting up dithering iterator");
-    let data = data.map(color_to_point);
-    // let data = data.map(|x| x * 0.8);
-    let data = data.enumerate().map(|(index, color)| {
-        let barycentric: Vector6<f32> = decomposer.decompose(&color, Decomposer6CAxisStrategy::Closest);
-        let x = index % 800;
-        let y = index / 800;
-        let noise = interleaved_gradient_noise(x as f32, y as f32);
-        let index = pick_from_barycentric_weights(barycentric, noise);
-        PALETTE_COLORS[index].clone()
-    });
-
-    println!("Dithering");
-    let start_dither = esp_hal::xtensa_lx::timer::get_cycle_count();
-    let data: alloc::vec::Vec<Spectra6Color> = data.collect();
-    let end_dither = esp_hal::xtensa_lx::timer::get_cycle_count();
-    let dither_duration_cycles = end_dither.wrapping_sub(start_dither);
-    println!("Duration: {:?} seconds", (dither_duration_cycles as f32)/(240_000_000.0));
     */
-    /*
-    let data = data.map(|color| {
-        let color_pt = color_to_point(color);
-        let distances = PALETTE.iter().enumerate().map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
-        let best = distances.reduce(|a,b| {
-            if a.1 < b.1 {
-                a
-            } else {
-                b
-            }
-        }).unwrap();
-        PALETTE_COLORS[best.0]
-    });
-    */
-    let data = (0..(1600 * 1200)).map(|idx| {
-        let x = idx % 1200;
-        let y = idx / 1200;
-        let bar = x / 200;
-        match bar {
-            0 => Spectra6Color::Black,
-            1 => Spectra6Color::White,
-            2 => Spectra6Color::Red,
-            3 => Spectra6Color::Green,
-            4 => Spectra6Color::Blue,
-            5 => Spectra6Color::Yellow,
-            _ => Spectra6Color::White,
-        }
-    });
 
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
