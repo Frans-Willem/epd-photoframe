@@ -194,6 +194,10 @@ where
         }
     }
 
+    pub fn is_busy(&mut self) -> bool {
+        self.busy.is_high().unwrap()
+    }
+
     pub async fn reset(
         &mut self,
         delay: &mut DELAY,

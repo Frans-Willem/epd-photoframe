@@ -25,11 +25,14 @@ use esp_backtrace as _;
 
 extern crate alloc;
 
-use reterminal_e100x::gdep073e01::Gdep073e01State;
+//use reterminal_e100x::gdep073e01::Gdep073e01State;
 use reterminal_e100x::spectra6::Spectra6Color;
+use reterminal_e100x::t133a01::T133A01;
 
 use nalgebra::base::Vector6;
 use nalgebra::geometry::Point3;
+
+use embedded_hal_async::delay::DelayNs;
 //use epd_dither::decomposer6c::{Decomposer6C, Decomposer6CAxisStrategy};
 //use epd_dither::noise::interleaved_gradient_noise;
 
@@ -89,17 +92,6 @@ const PALETTE_COLORS: [Spectra6Color; 6] = [
 fn color_to_point(color: [u8; 4]) -> Point3<f32> {
     let [r, g, b, _] = color.map(|c| c as f32);
     Point3::new(r, g, b)
-}
-
-// TODO: Move into epd-dither
-fn pick_from_barycentric_weights(weights: Vector6<f32>, offset: f32) -> usize {
-    let mut index = 0;
-    let mut offset = offset;
-    while index + 1 < 6 && weights[index] < offset {
-        offset -= weights[index];
-        index += 1;
-    }
-    index
 }
 
 struct Button<'t> {
@@ -251,6 +243,51 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
     body
 }
 
+struct QuadSpiBus<'d>(esp_hal::spi::master::Spi<'d, esp_hal::Async>);
+
+impl<'d> embedded_hal_async::spi::ErrorType for QuadSpiBus<'d> {
+    type Error = esp_hal::spi::Error;
+}
+impl<'d> embedded_hal_async::spi::SpiBus<u8> for QuadSpiBus<'d> {
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error>
+    {
+        todo!()
+    }
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error>
+    {
+        //println!("Writing {:?}", words);
+        self.0.half_duplex_write(
+            esp_hal::spi::master::DataMode::Quad,
+            esp_hal::spi::master::Command::None,
+            esp_hal::spi::master::Address::None,
+            0,
+            words
+        ).unwrap();
+        Ok(())
+    }
+    async fn transfer(
+        &mut self,
+        read: &mut [u8],
+        write: &[u8],
+    ) -> Result<(), Self::Error>
+    {
+        todo!()
+    }
+    async fn transfer_in_place(
+        &mut self,
+        words: &mut [u8],
+    ) -> Result<(), Self::Error>
+    {
+        todo!()
+    }
+    async fn flush(&mut self) -> Result<(), Self::Error>
+    {
+        self.0.flush().await
+    }
+}
+
+
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
@@ -318,6 +355,7 @@ async fn main(spawner: Spawner) -> ! {
         )))
         .unwrap();
 
+    /*
     let radio_init = RADIO_CONTROLLER
         .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
     let (mut wifi_controller, interfaces) =
@@ -358,6 +396,7 @@ async fn main(spawner: Spawner) -> ! {
     let (header, data) = png_decoder::decode(png_data.as_slice()).unwrap();
     println!("Header: {:?}", header);
     let data = data.into_iter();
+    */
 
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
@@ -369,25 +408,41 @@ async fn main(spawner: Spawner) -> ! {
     .unwrap();
     let epd_spi_bus = epd_spi_bus
         .with_sck(peripherals.GPIO7)
+        /*
+        .with_sio0(peripherals.GPIO9)
+        .with_sio1(peripherals.GPIO8)
+        .with_sio2(peripherals.GPIO17)
+        .with_sio3(peripherals.GPIO18)
+        */
+        .with_miso(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO9)
         .into_async();
+    //let epd_spi_bus = QuadSpiBus(epd_spi_bus);
+    
+    let mut tft_enable = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
+    tft_enable.set_high();
 
+    let mut cs_slave = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
+    //cs_slave.set_high();
+
+    // CS Master, CS Slave not yet connected
     let mut epd_spi_dev = ExclusiveDevice::new(
         epd_spi_bus,
-        Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
         embassy_time::Delay,
     )
     .unwrap();
 
-    let epd = Gdep073e01State::new(
+    let mut epd = T133A01::new(
         &mut epd_spi_dev,
         Input::new(
             peripherals.GPIO13,
             InputConfig::default().with_pull(Pull::Up),
         ),
         Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
-        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
         &mut embassy_time::Delay,
+        cs_slave,
     );
 
     /*
@@ -413,6 +468,7 @@ async fn main(spawner: Spawner) -> ! {
     let dither_duration_cycles = end_dither.wrapping_sub(start_dither);
     println!("Duration: {:?} seconds", (dither_duration_cycles as f32)/(240_000_000.0));
     */
+    /*
     let data = data.map(|color| {
         let color_pt = color_to_point(color);
         let distances = PALETTE.iter().enumerate().map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
@@ -425,26 +481,42 @@ async fn main(spawner: Spawner) -> ! {
         }).unwrap();
         PALETTE_COLORS[best.0]
     });
+    */
+    let data = (0..(1600 * 600)).map(|_| Spectra6Color::Blue);
 
     println!("Reset");
-    let epd = epd.reset(&mut embassy_time::Delay).await.unwrap();
+    epd.reset(&mut embassy_time::Delay).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
     println!("Init");
-    let epd = epd.init(&mut epd_spi_dev).await.unwrap();
+    epd.init(&mut epd_spi_dev).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
     println!("Power on");
-    let epd = epd.power_on(&mut epd_spi_dev).await.unwrap();
+    epd.power_on(&mut epd_spi_dev).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
     println!("Update frame");
-    let epd = epd.update_frame(&mut epd_spi_dev, data).await.unwrap();
+    epd.update_frame(&mut epd_spi_dev, data).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
     println!("Display frame");
-    let epd = epd.display_frame(&mut epd_spi_dev).await.unwrap();
+    epd.display_frame(&mut epd_spi_dev).await.unwrap();
+    println!("Wait until idle");
+    println!("Looping");
+    while true {
+        embassy_time::Delay.delay_us(10_000).await;
+    }
+    epd.wait_until_idle().await.unwrap();
     // Quick hack to allow clearing the screen for storage:
-    let epd = if esp_hal::gpio::Input::new(
+    if esp_hal::gpio::Input::new(
         gpio_btn_reset.reborrow(),
         esp_hal::gpio::InputConfig::default().with_pull(Pull::Up),
     )
     .is_low()
     {
         println!("Clearing screen before power off");
-        let epd = epd
+        epd
             .update_frame(
                 &mut epd_spi_dev,
                 (0..(800 * 480)).map(|_| Spectra6Color::Clean),
@@ -452,12 +524,10 @@ async fn main(spawner: Spawner) -> ! {
             .await
             .unwrap();
         epd.display_frame(&mut epd_spi_dev).await.unwrap()
-    } else {
-        epd
-    };
+    }
 
     println!("Power off");
-    let epd = epd.power_off(&mut epd_spi_dev).await.unwrap();
+    epd.power_off(&mut epd_spi_dev).await.unwrap();
     // TODO: Display deep sleep
     println!("Done");
     let _ = epd;
@@ -482,5 +552,9 @@ async fn main(spawner: Spawner) -> ! {
         &[&timer_wake_source, &pin_wake_source];
 
     println!("Going to deep sleep :)");
+    while true {
+        embassy_time::Delay.delay_us(10_000).await;
+        
+    }
     rtc.sleep_deep(wake_sources);
 }
