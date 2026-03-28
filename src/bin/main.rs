@@ -249,44 +249,32 @@ impl<'d> embedded_hal_async::spi::ErrorType for QuadSpiBus<'d> {
     type Error = esp_hal::spi::Error;
 }
 impl<'d> embedded_hal_async::spi::SpiBus<u8> for QuadSpiBus<'d> {
-    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error>
-    {
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
         todo!()
     }
-    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error>
-    {
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
         //println!("Writing {:?}", words);
-        self.0.half_duplex_write(
-            esp_hal::spi::master::DataMode::Quad,
-            esp_hal::spi::master::Command::None,
-            esp_hal::spi::master::Address::None,
-            0,
-            words
-        ).unwrap();
+        self.0
+            .half_duplex_write(
+                esp_hal::spi::master::DataMode::Quad,
+                esp_hal::spi::master::Command::None,
+                esp_hal::spi::master::Address::None,
+                0,
+                words,
+            )
+            .unwrap();
         Ok(())
     }
-    async fn transfer(
-        &mut self,
-        read: &mut [u8],
-        write: &[u8],
-    ) -> Result<(), Self::Error>
-    {
+    async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
         todo!()
     }
-    async fn transfer_in_place(
-        &mut self,
-        words: &mut [u8],
-    ) -> Result<(), Self::Error>
-    {
+    async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
         todo!()
     }
-    async fn flush(&mut self) -> Result<(), Self::Error>
-    {
+    async fn flush(&mut self) -> Result<(), Self::Error> {
         self.0.flush().await
     }
 }
-
-
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
@@ -406,7 +394,7 @@ async fn main(spawner: Spawner) -> ! {
             .with_mode(SpiMode::_0),
     )
     .unwrap();
-    let epd_spi_bus = epd_spi_bus
+    let mut epd_spi_bus = epd_spi_bus
         .with_sck(peripherals.GPIO7)
         /*
         .with_sio0(peripherals.GPIO9)
@@ -417,24 +405,17 @@ async fn main(spawner: Spawner) -> ! {
         .with_miso(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO9)
         .into_async();
-    //let epd_spi_bus = QuadSpiBus(epd_spi_bus);
-    
+
     let mut tft_enable = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
     tft_enable.set_high();
 
+    let mut cs_master = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let mut cs_slave = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
-    //cs_slave.set_high();
-
-    // CS Master, CS Slave not yet connected
-    let mut epd_spi_dev = ExclusiveDevice::new(
-        epd_spi_bus,
-        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
-        embassy_time::Delay,
-    )
-    .unwrap();
 
     let mut epd = T133A01::new(
-        &mut epd_spi_dev,
+        &mut epd_spi_bus,
+        cs_master,
+        cs_slave,
         Input::new(
             peripherals.GPIO13,
             InputConfig::default().with_pull(Pull::Up),
@@ -442,7 +423,6 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
         Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
         &mut embassy_time::Delay,
-        cs_slave,
     );
 
     /*
@@ -489,25 +469,26 @@ async fn main(spawner: Spawner) -> ! {
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Init");
-    epd.init(&mut epd_spi_dev).await.unwrap();
+    epd.init(&mut epd_spi_bus).await.unwrap();
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Power on");
-    epd.power_on(&mut epd_spi_dev).await.unwrap();
+    epd.power_on(&mut epd_spi_bus).await.unwrap();
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Update frame");
-    epd.update_frame(&mut epd_spi_dev, data).await.unwrap();
+    epd.update_frame(&mut epd_spi_bus, data).await.unwrap();
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Display frame");
-    epd.display_frame(&mut epd_spi_dev).await.unwrap();
+    epd.display_frame(&mut epd_spi_bus).await.unwrap();
     println!("Wait until idle");
     println!("Looping");
     while true {
         embassy_time::Delay.delay_us(10_000).await;
     }
     epd.wait_until_idle().await.unwrap();
+    /*
     // Quick hack to allow clearing the screen for storage:
     if esp_hal::gpio::Input::new(
         gpio_btn_reset.reborrow(),
@@ -531,6 +512,7 @@ async fn main(spawner: Spawner) -> ! {
     // TODO: Display deep sleep
     println!("Done");
     let _ = epd;
+    */
 
     // TODO: Spawn some tasks
     let _ = spawner;
@@ -554,7 +536,6 @@ async fn main(spawner: Spawner) -> ! {
     println!("Going to deep sleep :)");
     while true {
         embassy_time::Delay.delay_us(10_000).await;
-        
     }
     rtc.sleep_deep(wake_sources);
 }
