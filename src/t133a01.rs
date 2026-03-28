@@ -7,8 +7,7 @@ use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiBus;
 use esp_println::println;
 
-const SINGLE_BYTE_WRITE: bool = true;
-const IS_BUSY_LOW: bool = true;
+const SINGLE_BYTE_WRITE: bool = false;
 
 #[allow(non_camel_case_types, dead_code)]
 #[derive(Copy, Clone)]
@@ -250,16 +249,15 @@ where
         &mut self,
         spi: &mut SPI,
     ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
-        println!("Busy 0: {:?}", self.is_busy());
         // NOTE: Call after reset
         self.command(
             spi,
             Controller::Master,
-            Command::Cmd74,
+            Command::Cmd74, // Could be VCOM?
             [0x00, 0x0C, 0x0C, 0xD9, 0xDD, 0xDD, 0x15, 0x15, 0x55],
+            // ESPHome does [0xC0, 0x1C, 0x1C, 0xCC, 0xCC, 0xCC, 0x15, 0x15, 0x55]
         )
         .await?;
-        println!("Busy 1: {:?}", self.is_busy());
         self.command(
             spi,
             Controller::Both,
@@ -267,34 +265,26 @@ where
             [0x49, 0x55, 0x13, 0x5D, 0x05, 0x10],
         )
         .await?;
-        println!("Busy 2: {:?}", self.is_busy());
         self.wait_until_idle().await?;
         self.command(spi, Controller::Both, Command::PanelSetting, [0xDF, 0x69])
             .await?;
-        println!("Busy 3: {:?}", self.is_busy());
         self.command(spi, Controller::Master, Command::DCDC, [0x44, 0x54, 0x00])
             .await?;
-        println!("Busy 4: {:?}", self.is_busy());
         self.command(spi, Controller::Both, Command::CDI, [0x37])
             .await?;
-        println!("Busy 5: {:?}", self.is_busy());
         self.command(spi, Controller::Both, Command::Cmd60, [0x03, 0x03])
             .await?;
-        println!("Busy 6: {:?}", self.is_busy());
         self.command(spi, Controller::Both, Command::Cmd86, [0x10])
             .await?;
-        println!("Busy 7: {:?}", self.is_busy());
         self.command(spi, Controller::Both, Command::PWS, [0x22])
             .await?;
-        println!("Busy 8: {:?}", self.is_busy());
         self.command(
             spi,
             Controller::Both,
             Command::TRES,
-            [0x04, 0xB0, 0x03, 0x20],
+            [0x04, 0xB0, 0x03, 0x20], // 0x4B0 * 0x320 (1200 * 800) each
         )
         .await?;
-        println!("Busy 9: {:?}", self.is_busy());
         self.command(
             spi,
             Controller::Master,
@@ -302,10 +292,8 @@ where
             [0x0F, 0x00, 0x28, 0x2C, 0x28, 0x38],
         )
         .await?;
-        println!("Busy 10: {:?}", self.is_busy());
         self.command(spi, Controller::Master, Command::CmdB6, [0x07])
             .await?;
-        println!("Busy 11: {:?}", self.is_busy());
         self.command(
             spi,
             Controller::Master,
@@ -313,10 +301,8 @@ where
             [0xE0, 0x20],
         )
         .await?;
-        println!("Busy 12: {:?}", self.is_busy());
         self.command(spi, Controller::Master, Command::CmdB7, [0x01])
             .await?;
-        println!("Busy 13: {:?}", self.is_busy());
         self.command(
             spi,
             Controller::Master,
@@ -324,13 +310,10 @@ where
             [0xE0, 0x20],
         )
         .await?;
-        println!("Busy 14: {:?}", self.is_busy());
         self.command(spi, Controller::Master, Command::CmdB0, [0x01])
             .await?;
-        println!("Busy 15: {:?}", self.is_busy());
         self.command(spi, Controller::Master, Command::CmdB1, [0x02])
             .await?;
-        println!("Busy 16: {:?}", self.is_busy());
         Ok(())
     }
 
@@ -349,18 +332,19 @@ where
         self.command(spi, Controller::Both, Command::CCSET, [0x01])
             .await?;
         self.wait_until_idle().await?;
+        let mut data = SpectraPacker(pixels.into_iter());
         self.command(
             spi,
             Controller::Master,
             Command::DataStartTransmission,
-            (0..1600 * 300).map(|_| 0x55),
+            data.by_ref().take(1600*1200/4),
         )
         .await?;
         self.command(
             spi,
             Controller::Slave,
             Command::DataStartTransmission,
-            (0..1600 * 300).map(|_| 0x33),
+            data,
         )
         .await?;
         Ok(())

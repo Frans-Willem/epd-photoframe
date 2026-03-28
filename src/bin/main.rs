@@ -462,7 +462,20 @@ async fn main(spawner: Spawner) -> ! {
         PALETTE_COLORS[best.0]
     });
     */
-    let data = (0..(1600 * 600)).map(|_| Spectra6Color::Blue);
+    let data = (0..(1600 * 1200)).map(|idx| {
+        let x = idx % 1200;
+        let y = idx / 1200;
+        let bar = x / 200;
+        match bar {
+            0 => Spectra6Color::Black,
+            1 => Spectra6Color::White,
+            2 => Spectra6Color::Red,
+            3 => Spectra6Color::Green,
+            4 => Spectra6Color::Blue,
+            5 => Spectra6Color::Yellow,
+            _ => Spectra6Color::White,
+        }
+    });
 
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
