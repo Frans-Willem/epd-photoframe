@@ -29,9 +29,6 @@ extern crate alloc;
 use reterminal_e100x::spectra6::Spectra6Color;
 use reterminal_e100x::t133a01::T133A01;
 
-use nalgebra::base::Vector6;
-use nalgebra::geometry::Point3;
-
 use embedded_hal_async::delay::DelayNs;
 //use epd_dither::decomposer6c::{Decomposer6C, Decomposer6CAxisStrategy};
 //use epd_dither::noise::interleaved_gradient_noise;
@@ -40,58 +37,35 @@ use embedded_hal_async::delay::DelayNs;
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const PALETTE: [Point3<f32>; 6] = [
-    // Black
-    Point3::new(
-        0.22676264646610847 * 255.0,
-        0.0 * 255.0, //-0.0055970314385675474,
-        0.2597094644681131 * 255.0,
-    ),
-    // White
-    Point3::new(
-        0.7000095212021477 * 255.0,
-        0.8161663966432444 * 255.0,
-        0.7861384978213591 * 255.0,
-    ),
-    // NOTE: Next 4 need to be ordered cyclically!
-    // Blue
-    Point3::new(
-        0.2391826586300411 * 255.0,
-        0.1482584219935382 * 255.0,
-        0.596627604515917 * 255.0,
-    ),
-    // Green
-    Point3::new(
-        0.37804726446284537 * 255.0,
-        0.40898865257247025 * 255.0,
-        0.3388335156024263 * 255.0,
-    ),
-    // Red
-    Point3::new(
-        0.5903086439496402 * 255.0,
-        0.14710309178681208 * 255.0,
-        0.17200386219219121 * 255.0,
-    ),
-    // Yellow
-    Point3::new(
-        0.8417257856614314 * 255.0,
-        0.9126861145185275 * 255.0,
-        0.0 * 255.0, //-0.053016650312371474,
-    ),
+const PALETTE: [[u8; 3]; 6] = [
+    [58, 0, 66],     // Black
+    [179, 208, 200], // White
+    [215, 233, 0],   // Yellow
+    [151, 38, 44],   // Red
+    [61, 38, 152],   // Blue
+    [96, 104, 86],   // Green
 ];
 
 const PALETTE_COLORS: [Spectra6Color; 6] = [
     Spectra6Color::Black,
     Spectra6Color::White,
+    Spectra6Color::Yellow,
+    Spectra6Color::Red,
     Spectra6Color::Blue,
     Spectra6Color::Green,
-    Spectra6Color::Red,
-    Spectra6Color::Yellow,
 ];
 
-fn color_to_point(color: [u8; 4]) -> Point3<f32> {
-    let [r, g, b, _] = color.map(|c| c as f32);
-    Point3::new(r, g, b)
+fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
+    (0..3)
+        .map(|i| {
+            if a[i] > b[i] {
+                a[i] - b[i]
+            } else {
+                b[i] - a[i]
+            }
+        })
+        .map(|absdiff| (absdiff as u32) * (absdiff as u32))
+        .sum()
 }
 
 struct Button<'t> {
@@ -399,11 +373,11 @@ async fn main(spawner: Spawner) -> ! {
     let png_palette: alloc::vec::Vec<Spectra6Color> = (0..=255)
         .map(|index| image.palette(index))
         .map(|rgba| {
-            let color_pt = color_to_point(rgba);
+            let rgb: [u8; 3] = [rgba[0], rgba[1], rgba[2]];
             let distances = PALETTE
                 .iter()
                 .enumerate()
-                .map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
+                .map(|(index, spectra_color)| (index, color_distance(spectra_color, &rgb)));
             let best = distances
                 .reduce(|a, b| if a.1 < b.1 { a } else { b })
                 .unwrap();
@@ -458,9 +432,6 @@ async fn main(spawner: Spawner) -> ! {
         &mut embassy_time::Delay,
     );
 
-    /*
-     */
-
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
     println!("Wait until idle");
@@ -480,12 +451,7 @@ async fn main(spawner: Spawner) -> ! {
     println!("Display frame");
     epd.display_frame(&mut epd_spi_bus).await.unwrap();
     println!("Wait until idle");
-    println!("Looping");
-    while true {
-        embassy_time::Delay.delay_us(10_000).await;
-    }
     epd.wait_until_idle().await.unwrap();
-    /*
     // Quick hack to allow clearing the screen for storage:
     if esp_hal::gpio::Input::new(
         gpio_btn_reset.reborrow(),
@@ -494,22 +460,23 @@ async fn main(spawner: Spawner) -> ! {
     .is_low()
     {
         println!("Clearing screen before power off");
-        epd
-            .update_frame(
-                &mut epd_spi_dev,
-                (0..(800 * 480)).map(|_| Spectra6Color::Clean),
-            )
-            .await
-            .unwrap();
-        epd.display_frame(&mut epd_spi_dev).await.unwrap()
+        epd.update_frame(
+            &mut epd_spi_bus,
+            (0..(1600 * 1200)).map(|_| Spectra6Color::Clean),
+        )
+        .await
+        .unwrap();
+        epd.display_frame(&mut epd_spi_bus).await.unwrap();
+        epd.wait_until_idle().await.unwrap();
     }
 
     println!("Power off");
-    epd.power_off(&mut epd_spi_dev).await.unwrap();
+    epd.power_off(&mut epd_spi_bus).await.unwrap();
+    epd.wait_until_idle().await.unwrap();
+    tft_enable.set_low();
     // TODO: Display deep sleep
     println!("Done");
     let _ = epd;
-    */
 
     // TODO: Spawn some tasks
     let _ = spawner;
@@ -531,8 +498,5 @@ async fn main(spawner: Spawner) -> ! {
         &[&timer_wake_source, &pin_wake_source];
 
     println!("Going to deep sleep :)");
-    while true {
-        embassy_time::Delay.delay_us(10_000).await;
-    }
     rtc.sleep_deep(wake_sources);
 }

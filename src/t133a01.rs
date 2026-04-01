@@ -321,6 +321,16 @@ where
         &mut self,
         spi: &mut SPI,
     ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+        // TODO
+        Ok(())
+    }
+
+    pub async fn power_off(
+        &mut self,
+        spi: &mut SPI,
+    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+        self.command(spi, Controller::Both, Command::PowerOff, [0x00])
+            .await?;
         Ok(())
     }
 
