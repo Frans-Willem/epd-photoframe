@@ -229,7 +229,7 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
         .reader();
     println!("Reading body");
 
-    let mut body = alloc::vec::Vec::with_capacity(5*1024*1024);
+    let mut body = alloc::vec::Vec::new();
     loop {
         let chunk = response.fill_buf().await.unwrap();
         if chunk.is_empty() {
@@ -239,6 +239,7 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
         let len = chunk.len();
         response.consume(len);
     }
+    body.shrink_to_fit();
     println!("Got body");
     body
 }
@@ -380,27 +381,42 @@ async fn main(spawner: Spawner) -> ! {
 
     let png_data = get_image_data(net_stack).await;
     println!("Decode PNG");
-    let (header, data) = png_decoder::decode(png_data.as_slice()).unwrap();
-    println!("Header: {:?}", header);
+    let mut buffer = alloc::vec::Vec::new();
+    let header =
+        minipng::decode_png_header(png_data.as_slice()).expect("Unable to decode PNG header");
+    buffer.resize(header.required_bytes(), 0);
+    let image =
+        minipng::decode_png(png_data.as_slice(), &mut buffer).expect("Unable to decode PNG");
+    println!("Decoded PNG");
+    // TODO: Check if the color type is really indexed and bit depth is really 8 :)
+    println!(
+        "Image: {}x{} {:?} {:?}",
+        image.width(),
+        image.height(),
+        image.color_type(),
+        image.bit_depth()
+    );
+    let png_palette: alloc::vec::Vec<Spectra6Color> = (0..=255)
+        .map(|index| image.palette(index))
+        .map(|rgba| {
+            let color_pt = color_to_point(rgba);
+            let distances = PALETTE
+                .iter()
+                .enumerate()
+                .map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
+            let best = distances
+                .reduce(|a, b| if a.1 < b.1 { a } else { b })
+                .unwrap();
+            PALETTE_COLORS[best.0]
+        })
+        .collect();
     let data = (0..(1600 * 1200)).map(|idx| {
         let x = idx % 600;
         let y = idx / 600;
         let half = y / 1600;
         let y = y % 1600;
         let x = if half > 0 { x + 600 } else { x };
-        data[(y * 1200) + x]
-    });
-    let data = data.map(|color| {
-        let color_pt = color_to_point(color);
-        let distances = PALETTE.iter().enumerate().map(|(index, pt)| (index, (pt.clone() - color_pt).norm_squared()));
-        let best = distances.reduce(|a,b| {
-            if a.1 < b.1 {
-                a
-            } else {
-                b
-            }
-        }).unwrap();
-        PALETTE_COLORS[best.0]
+        png_palette[image.pixels()[(y * image.bytes_per_row()) + x] as usize]
     });
 
     let epd_spi_bus = Spi::new(
@@ -443,7 +459,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     /*
-    */
+     */
 
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
