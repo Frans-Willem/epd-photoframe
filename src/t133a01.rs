@@ -337,16 +337,11 @@ where
             spi,
             Controller::Master,
             Command::DataStartTransmission,
-            data.by_ref().take(1600*1200/4),
+            data.by_ref().take(1600 * 1200 / 4),
         )
         .await?;
-        self.command(
-            spi,
-            Controller::Slave,
-            Command::DataStartTransmission,
-            data,
-        )
-        .await?;
+        self.command(spi, Controller::Slave, Command::DataStartTransmission, data)
+            .await?;
         Ok(())
     }
 
