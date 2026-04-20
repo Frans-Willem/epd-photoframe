@@ -321,7 +321,9 @@ where
         &mut self,
         spi: &mut SPI,
     ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
-        // TODO
+        self.command(spi, Controller::Both, Command::PowerOn, [])
+            .await?;
+        self.wait_until_idle().await?;
         Ok(())
     }
 
@@ -331,6 +333,7 @@ where
     ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
         self.command(spi, Controller::Both, Command::PowerOff, [0x00])
             .await?;
+        self.wait_until_idle().await?;
         Ok(())
     }
 
@@ -355,20 +358,16 @@ where
         Ok(())
     }
 
-    pub async fn display_frame(
+    /// Triggers a display refresh and returns immediately without waiting for
+    /// it to complete. A full refresh takes ~20 seconds; call
+    /// [`wait_until_idle`](Self::wait_until_idle) afterwards to block, or
+    /// [`reset`](Self::reset) to abort.
+    pub async fn display_frame_no_wait(
         &mut self,
         spi: &mut SPI,
     ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
-        self.command(spi, Controller::Both, Command::PowerOn, [])
-            .await?;
-        self.wait_until_idle().await?;
         self.command(spi, Controller::Both, Command::DisplayRefresh, [0x01])
-            .await?;
-        self.wait_until_idle().await?;
-        self.command(spi, Controller::Both, Command::PowerOff, [0x00])
-            .await?;
-        self.wait_until_idle().await?;
-        Ok(())
+            .await
     }
 
     /*

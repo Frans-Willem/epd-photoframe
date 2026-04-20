@@ -19,24 +19,34 @@ use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::Config as SpiConfig;
 use esp_hal::spi::master::Spi;
 
-use embedded_hal_bus::spi::ExclusiveDevice;
-
 use esp_backtrace as _;
 
 extern crate alloc;
 
-//use reterminal_e100x::gdep073e01::Gdep073e01State;
 use reterminal_e100x::spectra6::Spectra6Color;
-use reterminal_e100x::t133a01::T133A01;
 
-use embedded_hal_async::delay::DelayNs;
-//use epd_dither::decomposer6c::{Decomposer6C, Decomposer6CAxisStrategy};
-//use epd_dither::noise::interleaved_gradient_noise;
+#[cfg(feature = "e1002")]
+use reterminal_e100x::gdep073e01::Gdep073e01;
+#[cfg(feature = "e1004")]
+use reterminal_e100x::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
+// PNG image dimensions expected over HTTP. Must match the physical panel.
+#[cfg(feature = "e1002")]
+const PANEL_WIDTH: usize = 800;
+#[cfg(feature = "e1002")]
+const PANEL_HEIGHT: usize = 480;
+
+#[cfg(feature = "e1004")]
+const PANEL_WIDTH: usize = 1200;
+#[cfg(feature = "e1004")]
+const PANEL_HEIGHT: usize = 1600;
+
+// Reference RGB for each Spectra 6 ink, used to map PNG palette entries to the
+// closest `Spectra6Color`. Same for both Spectra 6 panels.
 const PALETTE: [[u8; 3]; 6] = [
     [58, 0, 66],     // Black
     [179, 208, 200], // White
@@ -66,6 +76,26 @@ fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
         })
         .map(|absdiff| (absdiff as u32) * (absdiff as u32))
         .sum()
+}
+
+// Map a flat output index (0..PANEL_WIDTH*PANEL_HEIGHT) to (x, y) in the source
+// PNG. E1002 is a straight row-major scan. E1004's T133A01 has master/slave
+// controllers each taking a half-width stripe, so the iterator emits the left
+// half fully before the right half.
+#[cfg(feature = "e1002")]
+fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+    (idx % PANEL_WIDTH, idx / PANEL_WIDTH)
+}
+
+#[cfg(feature = "e1004")]
+fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+    let half_width = PANEL_WIDTH / 2;
+    let x = idx % half_width;
+    let y_total = idx / half_width;
+    let half = y_total / PANEL_HEIGHT;
+    let y = y_total % PANEL_HEIGHT;
+    let x = if half > 0 { x + half_width } else { x };
+    (x, y)
 }
 
 struct Button<'t> {
@@ -134,7 +164,6 @@ async fn button_task(mut button: Button<'static>, button_name: &'static str) {
 #[embassy_executor::task]
 async fn blink_task(mut led: Output<'static>) {
     loop {
-        //println!("Toggle LED!");
         led.toggle();
         Timer::after(Duration::from_millis(500)).await;
     }
@@ -180,9 +209,7 @@ static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
 
 use embedded_io_async::BufRead;
 async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8> {
-    // DNS Client
     let dns = embassy_net::dns::DnsSocket::new(stack);
-    // TCP state
     let tcp_state = embassy_net::tcp::client::TcpClientState::<1, 4096, 4096>::new();
     let tcp = embassy_net::tcp::client::TcpClient::new(stack, &tcp_state);
 
@@ -218,44 +245,10 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
     body
 }
 
-struct QuadSpiBus<'d>(esp_hal::spi::master::Spi<'d, esp_hal::Async>);
-
-impl<'d> embedded_hal_async::spi::ErrorType for QuadSpiBus<'d> {
-    type Error = esp_hal::spi::Error;
-}
-impl<'d> embedded_hal_async::spi::SpiBus<u8> for QuadSpiBus<'d> {
-    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
-        //println!("Writing {:?}", words);
-        self.0
-            .half_duplex_write(
-                esp_hal::spi::master::DataMode::Quad,
-                esp_hal::spi::master::Command::None,
-                esp_hal::spi::master::Address::None,
-                0,
-                words,
-            )
-            .unwrap();
-        Ok(())
-    }
-    async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-    async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        self.0.flush().await
-    }
-}
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
     let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
-    // generator version: 1.0.1
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let mut gpio_btn_reset = peripherals.GPIO3;
@@ -278,18 +271,6 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
-    /*
-    spawner
-        .spawn(button_task(
-            Button::new(
-                peripherals.GPIO3,
-                InputConfig::default().with_pull(Pull::Up),
-                true,
-            )
-            "Refresh",
-        ))
-        .unwrap();
-    */
     spawner
         .spawn(button_task(
             Button::new(
@@ -328,7 +309,6 @@ async fn main(spawner: Spawner) -> ! {
     const PASSWORD: &str = env!("WIFI_PASSWORD");
 
     let wifi_sta_device = interfaces.sta;
-
     let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
     let station_config = esp_radio::wifi::ModeConfig::Client(
@@ -362,7 +342,7 @@ async fn main(spawner: Spawner) -> ! {
     let image =
         minipng::decode_png(png_data.as_slice(), &mut buffer).expect("Unable to decode PNG");
     println!("Decoded PNG");
-    // TODO: Check if the color type is really indexed and bit depth is really 8 :)
+    // TODO: Check color type is indexed and bit depth is 8.
     println!(
         "Image: {}x{} {:?} {:?}",
         image.width(),
@@ -370,29 +350,27 @@ async fn main(spawner: Spawner) -> ! {
         image.color_type(),
         image.bit_depth()
     );
+
     let png_palette: alloc::vec::Vec<Spectra6Color> = (0..=255)
         .map(|index| image.palette(index))
         .map(|rgba| {
             let rgb: [u8; 3] = [rgba[0], rgba[1], rgba[2]];
-            let distances = PALETTE
+            let best = PALETTE
                 .iter()
                 .enumerate()
-                .map(|(index, spectra_color)| (index, color_distance(spectra_color, &rgb)));
-            let best = distances
+                .map(|(i, ref_rgb)| (i, color_distance(ref_rgb, &rgb)))
                 .reduce(|a, b| if a.1 < b.1 { a } else { b })
                 .unwrap();
             PALETTE_COLORS[best.0]
         })
         .collect();
-    let data = (0..(1600 * 1200)).map(|idx| {
-        let x = idx % 600;
-        let y = idx / 600;
-        let half = y / 1600;
-        let y = y % 1600;
-        let x = if half > 0 { x + 600 } else { x };
+
+    let data = (0..(PANEL_WIDTH * PANEL_HEIGHT)).map(|idx| {
+        let (x, y) = output_index_to_image_xy(idx);
         png_palette[image.pixels()[(y * image.bytes_per_row()) + x] as usize]
     });
 
+    // --- SPI bus and panel driver setup (device-specific) ---
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -401,28 +379,46 @@ async fn main(spawner: Spawner) -> ! {
             .with_mode(SpiMode::_0),
     )
     .unwrap();
+
+    #[cfg(feature = "e1002")]
     let mut epd_spi_bus = epd_spi_bus
         .with_sck(peripherals.GPIO7)
-        /*
-        .with_sio0(peripherals.GPIO9)
-        .with_sio1(peripherals.GPIO8)
-        .with_sio2(peripherals.GPIO17)
-        .with_sio3(peripherals.GPIO18)
-        */
+        .with_mosi(peripherals.GPIO9)
+        .into_async();
+
+    #[cfg(feature = "e1004")]
+    let mut epd_spi_bus = epd_spi_bus
+        .with_sck(peripherals.GPIO7)
         .with_miso(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO9)
         .into_async();
 
-    let mut tft_enable = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
-    tft_enable.set_high();
+    // E1004: TFT enable rail must be high while the panel is powered.
+    #[cfg(feature = "e1004")]
+    let mut tft_enable = {
+        let mut p = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
+        p.set_high();
+        p
+    };
 
-    let mut cs_master = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
-    let mut cs_slave = Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default());
+    #[cfg(feature = "e1002")]
+    let mut epd = Gdep073e01::new(
+        &mut epd_spi_bus,
+        Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default()),
+        Input::new(
+            peripherals.GPIO13,
+            InputConfig::default().with_pull(Pull::Up),
+        ),
+        Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
+        &mut embassy_time::Delay,
+    );
 
+    #[cfg(feature = "e1004")]
     let mut epd = T133A01::new(
         &mut epd_spi_bus,
-        cs_master,
-        cs_slave,
+        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO2, Level::Low, OutputConfig::default()),
         Input::new(
             peripherals.GPIO13,
             InputConfig::default().with_pull(Pull::Up),
@@ -438,21 +434,17 @@ async fn main(spawner: Spawner) -> ! {
     epd.wait_until_idle().await.unwrap();
     println!("Init");
     epd.init(&mut epd_spi_bus).await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
     println!("Power on");
     epd.power_on(&mut epd_spi_bus).await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
     println!("Update frame");
     epd.update_frame(&mut epd_spi_bus, data).await.unwrap();
-    println!("Wait until idle");
+    println!("Trigger refresh");
+    epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
+    println!("Wait until idle (~20s refresh)");
     epd.wait_until_idle().await.unwrap();
-    println!("Display frame");
-    epd.display_frame(&mut epd_spi_bus).await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
-    // Quick hack to allow clearing the screen for storage:
+
+    // Quick hack to allow clearing the screen for storage: hold refresh button
+    // while the final refresh is in progress.
     if esp_hal::gpio::Input::new(
         gpio_btn_reset.reborrow(),
         esp_hal::gpio::InputConfig::default().with_pull(Pull::Up),
@@ -462,23 +454,24 @@ async fn main(spawner: Spawner) -> ! {
         println!("Clearing screen before power off");
         epd.update_frame(
             &mut epd_spi_bus,
-            (0..(1600 * 1200)).map(|_| Spectra6Color::Clean),
+            (0..(PANEL_WIDTH * PANEL_HEIGHT)).map(|_| Spectra6Color::Clean),
         )
         .await
         .unwrap();
-        epd.display_frame(&mut epd_spi_bus).await.unwrap();
+        println!("Trigger refresh (clear)");
+        epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
+        println!("Wait until idle (~20s refresh)");
         epd.wait_until_idle().await.unwrap();
     }
 
     println!("Power off");
     epd.power_off(&mut epd_spi_bus).await.unwrap();
-    epd.wait_until_idle().await.unwrap();
+
+    #[cfg(feature = "e1004")]
     tft_enable.set_low();
-    // TODO: Display deep sleep
+
     println!("Done");
     let _ = epd;
-
-    // TODO: Spawn some tasks
     let _ = spawner;
 
     println!("Deep sleep!");

@@ -22,4 +22,5 @@ target/
 #.idea/
 
 secrets.sh
+secrets_*.sh
 Cargo.lock

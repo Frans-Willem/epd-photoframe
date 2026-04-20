@@ -8,6 +8,12 @@ version      = "0.1.0"
 name = "reterminal_e100x"
 path = "./src/bin/main.rs"
 
+[features]
+default = ["e1004"]
+# Select exactly one device. Each device selects its panel driver and pinout.
+e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
+e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
+
 [dependencies]
 esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable", "psram"] }
 
@@ -51,7 +57,6 @@ critical-section = "1.2.0"
 static_cell      = "2.1.1"
 esp-println = { version = "0.16.1", features = ["esp32s3"] }
 esp-backtrace = { version = "0.18.1", features = ["esp32s3", "println", "panic-handler"] }
-embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-hal = "1.0.0"
 arrayvec = { version = "0.7.6", default-features = false }
 embedded-hal-async = "1.0.0"
