@@ -8,6 +8,18 @@ use embedded_hal_async::spi::SpiBus;
 
 // Panel: GooDisplay GDEP073E01 (800x480, Spectra 6, found in reTerminal E1002).
 // Controller appears similar to UC8159 / SPD1656.
+
+pub const fn panel_size() -> (usize, usize) {
+    (800, 480)
+}
+
+/// Map a flat output index in `0..w*h` to the `(x, y)` coordinate the
+/// corresponding pixel should be fetched from in a row-major source image.
+pub const fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+    let (w, _) = panel_size();
+    (idx % w, idx / w)
+}
+
 #[allow(non_camel_case_types, dead_code)]
 #[derive(Copy, Clone)]
 enum Command {

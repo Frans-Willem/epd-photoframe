@@ -9,6 +9,25 @@ use esp_println::println;
 
 const SINGLE_BYTE_WRITE: bool = false;
 
+pub const fn panel_size() -> (usize, usize) {
+    (1200, 1600)
+}
+
+/// Map a flat output index in `0..w*h` to the `(x, y)` coordinate the
+/// corresponding pixel should be fetched from in a row-major source image.
+/// The T133A01 has master/slave controllers each taking a half-width stripe,
+/// so the iterator emits the left half fully before the right half.
+pub const fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+    let (w, h) = panel_size();
+    let half_width = w / 2;
+    let x = idx % half_width;
+    let y_total = idx / half_width;
+    let half = y_total / h;
+    let y = y_total % h;
+    let x = if half > 0 { x + half_width } else { x };
+    (x, y)
+}
+
 #[allow(non_camel_case_types, dead_code)]
 #[derive(Copy, Clone)]
 enum Command {

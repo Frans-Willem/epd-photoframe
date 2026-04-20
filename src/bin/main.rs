@@ -26,24 +26,13 @@ extern crate alloc;
 use reterminal_e100x::spectra6::Spectra6Color;
 
 #[cfg(feature = "e1002")]
-use reterminal_e100x::gdep073e01::Gdep073e01;
+use reterminal_e100x::gdep073e01::{self as panel, Gdep073e01};
 #[cfg(feature = "e1004")]
-use reterminal_e100x::t133a01::T133A01;
+use reterminal_e100x::t133a01::{self as panel, T133A01};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
-
-// PNG image dimensions expected over HTTP. Must match the physical panel.
-#[cfg(feature = "e1002")]
-const PANEL_WIDTH: usize = 800;
-#[cfg(feature = "e1002")]
-const PANEL_HEIGHT: usize = 480;
-
-#[cfg(feature = "e1004")]
-const PANEL_WIDTH: usize = 1200;
-#[cfg(feature = "e1004")]
-const PANEL_HEIGHT: usize = 1600;
 
 // Reference RGB for each Spectra 6 ink, used to map PNG palette entries to the
 // closest `Spectra6Color`. Same for both Spectra 6 panels.
@@ -76,26 +65,6 @@ fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
         })
         .map(|absdiff| (absdiff as u32) * (absdiff as u32))
         .sum()
-}
-
-// Map a flat output index (0..PANEL_WIDTH*PANEL_HEIGHT) to (x, y) in the source
-// PNG. E1002 is a straight row-major scan. E1004's T133A01 has master/slave
-// controllers each taking a half-width stripe, so the iterator emits the left
-// half fully before the right half.
-#[cfg(feature = "e1002")]
-fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
-    (idx % PANEL_WIDTH, idx / PANEL_WIDTH)
-}
-
-#[cfg(feature = "e1004")]
-fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
-    let half_width = PANEL_WIDTH / 2;
-    let x = idx % half_width;
-    let y_total = idx / half_width;
-    let half = y_total / PANEL_HEIGHT;
-    let y = y_total % PANEL_HEIGHT;
-    let x = if half > 0 { x + half_width } else { x };
-    (x, y)
 }
 
 struct Button<'t> {
@@ -365,8 +334,9 @@ async fn main(spawner: Spawner) -> ! {
         })
         .collect();
 
-    let data = (0..(PANEL_WIDTH * PANEL_HEIGHT)).map(|idx| {
-        let (x, y) = output_index_to_image_xy(idx);
+    let (panel_width, panel_height) = panel::panel_size();
+    let data = (0..(panel_width * panel_height)).map(|idx| {
+        let (x, y) = panel::output_index_to_image_xy(idx);
         png_palette[image.pixels()[(y * image.bytes_per_row()) + x] as usize]
     });
 
@@ -454,7 +424,7 @@ async fn main(spawner: Spawner) -> ! {
         println!("Clearing screen before power off");
         epd.update_frame(
             &mut epd_spi_bus,
-            (0..(PANEL_WIDTH * PANEL_HEIGHT)).map(|_| Spectra6Color::Clean),
+            (0..(panel_width * panel_height)).map(|_| Spectra6Color::Clean),
         )
         .await
         .unwrap();
