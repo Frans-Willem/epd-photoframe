@@ -9,7 +9,6 @@ name = "reterminal_e100x"
 path = "./src/bin/main.rs"
 
 [features]
-default = ["e1004"]
 # Select exactly one device. Each device selects its panel driver and pinout.
 e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
 e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)

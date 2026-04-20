@@ -26,17 +26,17 @@ Stretch goals:
 
 Supported devices
 -----------------
-Build with `cargo build --no-default-features --features <device>`:
+Build with `cargo build --features <device>` (exactly one device feature
+must be enabled — there is no default):
 
 | Feature | Device      | Panel     | Resolution  | State       |
 |---------|-------------|-----------|-------------|-------------|
-| `e1004` | reTerminal E1004 (13") | T133A01   | 1200×1600 | working (default) |
 | `e1002` | reTerminal E1002 (7")  | GDEP073E01 | 800×480  | working     |
+| `e1004` | reTerminal E1004 (13") | T133A01   | 1200×1600 | working     |
 | —       | reTerminal E1001 (7")  | GDEY075T7 | 800×480 (grayscale) | not implemented |
 
 Both panel driver modules are always compiled regardless of the selected
-feature so changes surface compile errors in both. Exactly one device feature
-must be enabled.
+feature so changes surface compile errors in both.
 
 Progress
 --------
