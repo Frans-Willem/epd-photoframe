@@ -11,7 +11,7 @@ perspective. Should be caught and surfaced: wrap the wait in a timeout
 `error_image::render` explaining that WiFi connection failed, then go to
 deep sleep (so we retry on the next wake rather than burning battery in
 the retry loop). Once runtime WiFi configuration lands, this error frame
-should also hint at entering config mode (hold Previous+Next for 30 s).
+should also hint at entering config mode (hold Previous+Next for 10 s).
 
 ## Button presses during refresh are ignored
 
@@ -37,4 +37,4 @@ don't need.
 `WIFI_SSID`, `WIFI_PASSWORD`, and `WIFI_URL` are currently baked into the
 binary via `env!`. They should be user-configurable at runtime, most
 likely via a WiFi access-point captive portal (see the Previous+Next
-30-second-hold placeholder in `main.rs`).
+10-second-hold placeholder in `main.rs`).

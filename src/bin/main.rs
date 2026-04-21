@@ -166,6 +166,196 @@ fn determine_wake_action(
     }
 }
 
+/// Fully-specialised type of the built panel driver. Both variants expose
+/// the same method API (`reset` / `init` / `power_on` / `update_frame` /
+/// `display_frame_no_wait` / `wait_until_idle` / `power_off`), so the rest
+/// of the firmware can use `EpdPanel` without cfg gates.
+#[cfg(feature = "e1002")]
+type EpdPanel = Gdep073e01<
+    Spi<'static, esp_hal::Async>,
+    Output<'static>,
+    Input<'static>,
+    Output<'static>,
+    Output<'static>,
+    embassy_time::Delay,
+>;
+#[cfg(feature = "e1004")]
+type EpdPanel = T133A01<
+    Spi<'static, esp_hal::Async>,
+    Output<'static>, // cs_master
+    Output<'static>, // cs_slave
+    Input<'static>,
+    Output<'static>, // dc
+    Output<'static>, // rst
+    embassy_time::Delay,
+>;
+
+/// Everything both `main_config` and `main_normal` need. The panel driver
+/// is pre-built (aliased as `EpdPanel` above) so the rest of the firmware
+/// doesn't need cfg gates for pin counts or panel-model-specific types.
+struct HardwareCtx {
+    spawner: Spawner,
+    rtc: esp_hal::rtc_cntl::Rtc<'static>,
+    wake_action: WakeAction,
+    wifi: esp_hal::peripherals::WIFI<'static>,
+
+    // Button pins; held here so we can hand them to `RtcioWakeupSource`
+    // at the end of the normal flow as deep-sleep wake sources.
+    gpio_btn_refresh: esp_hal::gpio::AnyPin<'static>,
+    gpio_btn_previous: esp_hal::gpio::AnyPin<'static>,
+    gpio_btn_next: esp_hal::gpio::AnyPin<'static>,
+
+    // Pre-built SPI bus (SCK/MOSI, plus MISO on E1004) and pre-built EPD
+    // driver holding its CS/BUSY/DC/RST pins.
+    spi_bus: Spi<'static, esp_hal::Async>,
+    epd: EpdPanel,
+
+    // E1004 drives a TFT-enable rail that must be high while the panel is
+    // powered. Already configured high for devices that have it; `None`
+    // for devices that don't.
+    tft_enable: Option<Output<'static>>,
+}
+
+/// Credentials + URL for the normal flow. Deliberately split out of
+/// `HardwareCtx` because `main_config` doesn't need them.
+struct WifiCredentials {
+    ssid: String,
+    password: String,
+    base_url: String,
+}
+
+/// Stage 2 placeholder for the real configuration-mode body. Stage 3 will
+/// replace this with the WiFi AP + captive portal + QR code on the panel,
+/// ending in a software reset. For now it just blocks forever so the device
+/// stays visibly "in config mode" (LED blinking, nothing else happening)
+/// until the user power-cycles.
+async fn main_config(_ctx: HardwareCtx) -> ! {
+    println!("[STAGE 2 STUB] Entering configuration mode; blocking.");
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+    }
+}
+
+/// The normal refresh flow: bring the panel up, optionally flash white for
+/// immediate feedback, connect to WiFi, fetch + decode the image, trigger
+/// the real refresh, then deep-sleep waking on either the 10-minute timer
+/// or a button press.
+async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
+    let HardwareCtx {
+        spawner,
+        mut rtc,
+        wake_action,
+        wifi,
+        mut gpio_btn_refresh,
+        mut gpio_btn_previous,
+        mut gpio_btn_next,
+        mut spi_bus,
+        mut epd,
+        mut tft_enable,
+    } = ctx;
+
+    let (panel_width, panel_height) = panel::panel_size();
+
+    // --- WiFi bring-up (runs in parallel with any ongoing white pre-flash
+    // that `main` started before the config-mode race). ---
+    let radio_init = RADIO_CONTROLLER
+        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
+    let (mut wifi_controller, interfaces) =
+        esp_radio::wifi::new(radio_init, wifi, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+
+    let wifi_sta_device = interfaces.sta;
+    let sta_config = embassy_net::Config::dhcpv4(Default::default());
+
+    let station_config = esp_radio::wifi::ModeConfig::Client(
+        esp_radio::wifi::ClientConfig::default()
+            .with_ssid(creds.ssid.as_str().into())
+            .with_password(creds.password.as_str().into()),
+    );
+    wifi_controller.set_config(&station_config).unwrap();
+
+    let rng = esp_hal::rng::Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+
+    let (net_stack, net_runner) =
+        embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
+
+    spawner.spawn(wifi_task(wifi_controller)).unwrap();
+    spawner.spawn(net_task(net_runner)).unwrap();
+
+    println!("Waiting for network link...");
+    net_stack.wait_link_up().await;
+    println!("Link up, waiting for config up");
+    net_stack.wait_config_up().await;
+    println!("Network config up! {:?}", net_stack.config_v4());
+
+    // Build the request URL with the appropriate action query param.
+    let url: String = match wake_action.query() {
+        Some(q) => format!("{}{}", creds.base_url, q),
+        None => creds.base_url.clone(),
+    };
+    println!("Fetching {}", url);
+
+    let frame: Vec<Spectra6Color> =
+        match try_build_frame(net_stack, &url, panel_width, panel_height).await {
+            Ok(f) => f,
+            Err(msg) => {
+                println!("Falling back to error image: {}", msg);
+                error_image::render(panel_width, panel_height, &msg)
+            }
+        };
+
+    // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
+    println!("Reset");
+    epd.reset(&mut embassy_time::Delay).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
+    println!("Init");
+    epd.init(&mut spi_bus).await.unwrap();
+    println!("Power on");
+    epd.power_on(&mut spi_bus).await.unwrap();
+    println!("Update frame");
+    let data = (0..(panel_width * panel_height)).map(|idx| {
+        let (x, y) = panel::output_index_to_image_xy(idx);
+        frame[y * panel_width + x]
+    });
+    epd.update_frame(&mut spi_bus, data).await.unwrap();
+    println!("Trigger refresh");
+    epd.display_frame_no_wait(&mut spi_bus).await.unwrap();
+    println!("Wait until idle (~20s refresh)");
+    epd.wait_until_idle().await.unwrap();
+
+    println!("Power off");
+    epd.power_off(&mut spi_bus).await.unwrap();
+
+    if let Some(ref mut tft) = tft_enable {
+        tft.set_low();
+    }
+
+    println!("Done");
+    let _ = epd;
+
+    println!("Deep sleep!");
+
+    let wakeup_pins: &mut [(
+        &mut dyn esp_hal::gpio::RtcPin,
+        esp_hal::rtc_cntl::sleep::WakeupLevel,
+    )] = &mut [
+        (&mut gpio_btn_refresh, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_btn_previous, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_btn_next, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+    ];
+    let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
+
+    let timer_wake_source =
+        esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(core::time::Duration::from_secs(10 * 60));
+    let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] =
+        &[&timer_wake_source, &pin_wake_source];
+
+    println!("Going to deep sleep :)");
+    rtc.sleep_deep(wake_sources);
+}
+
 #[embassy_executor::task]
 async fn blink_task(mut led: Output<'static>) {
     loop {
@@ -404,13 +594,6 @@ async fn main(spawner: Spawner) -> ! {
          uptime={time_since_boot:?}"
     );
 
-    // TODO: if wake_action is Previous or Next and both buttons are still held,
-    // wait up to 30 seconds; if they stay held for the whole window, enter a
-    // WiFi access-point configuration mode. Placeholder for now.
-    if previous_held && next_held {
-        println!("TODO: previous+next held at wake; AP config mode would engage after 30s.");
-    }
-
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
@@ -467,9 +650,7 @@ async fn main(spawner: Spawner) -> ! {
         )))
         .unwrap();
 
-    // --- SPI bus and panel driver setup (device-specific) ---
-    let (panel_width, panel_height) = panel::panel_size();
-
+    // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -494,11 +675,13 @@ async fn main(spawner: Spawner) -> ! {
 
     // E1004: TFT enable rail must be high while the panel is powered.
     #[cfg(feature = "e1004")]
-    let mut tft_enable = {
+    let tft_enable: Option<Output<'static>> = Some({
         let mut p = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
         p.set_high();
         p
-    };
+    });
+    #[cfg(feature = "e1002")]
+    let tft_enable: Option<Output<'static>> = None;
 
     #[cfg(feature = "e1002")]
     let mut epd = Gdep073e01::new(
@@ -527,8 +710,15 @@ async fn main(spawner: Spawner) -> ! {
         &mut embassy_time::Delay,
     );
 
-    // --- White pre-flash (non-blocking) for immediate user feedback. ---
+    // --- White pre-flash (non-blocking) for immediate user feedback ---
+    //
+    // Kicked off before we decide which flow to run so the user sees the
+    // panel start updating as soon as the device wakes, even while the
+    // config-mode race is still counting down. Whichever flow wins will
+    // reset the panel to draw its own content on top; the ~20 s refresh
+    // just continues in the background until then.
     if wake_action.show_white_flash() {
+        let (panel_width, panel_height) = panel::panel_size();
         println!("White pre-flash");
         println!("Reset");
         epd.reset(&mut embassy_time::Delay).await.unwrap();
@@ -547,105 +737,62 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
         println!("Trigger refresh (no wait)");
         epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
-        // Intentionally no wait_until_idle: the refresh continues while we do
-        // WiFi/HTTP work; the reset below will abort it before the real push.
     }
 
-    // --- WiFi bring-up (runs in parallel with any ongoing white refresh). ---
-    let radio_init = RADIO_CONTROLLER
-        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-
-    let wifi_sta_device = interfaces.sta;
-    let sta_config = embassy_net::Config::dhcpv4(Default::default());
-
-    let station_config = esp_radio::wifi::ModeConfig::Client(
-        esp_radio::wifi::ClientConfig::default()
-            .with_ssid(wifi_ssid.as_str().into())
-            .with_password(wifi_password.as_str().into()),
-    );
-    wifi_controller.set_config(&station_config).unwrap();
-
-    let rng = esp_hal::rng::Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-
-    let (net_stack, net_runner) =
-        embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
-
-    spawner.spawn(wifi_task(wifi_controller)).unwrap();
-    spawner.spawn(net_task(net_runner)).unwrap();
-
-    println!("Waiting for network link...");
-    net_stack.wait_link_up().await;
-    println!("Link up, waiting for config up");
-    net_stack.wait_config_up().await;
-    println!("Network config up! {:?}", net_stack.config_v4());
-
-    // Build the request URL with the appropriate action query param.
-    let url: String = match wake_action.query() {
-        Some(q) => format!("{}{}", base_url, q),
-        None => base_url.clone(),
+    // Race a 10-second timer against either Previous or Next being released.
+    // If both were held at boot and stay held for the whole window, the
+    // timer wins and we enter configuration mode. If either (or both) was
+    // never pressed, `wait_for_high` resolves immediately because the pin
+    // is already high, so normally this block completes in microseconds.
+    //
+    // ("No stored config → enter config mode" is deliberately NOT wired up
+    // in Stage 2: the `env!()` fallback still provides working values for
+    // dev builds. Stage 3, when the captive portal can actually accept
+    // input, will add that second trigger and drop the `env!()` fallback.)
+    let entering_config_mode = {
+        let mut prev_input = Input::new(
+            gpio_btn_previous.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut next_input = Input::new(
+            gpio_btn_next.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        matches!(
+            embassy_futures::select::select3(
+                prev_input.wait_for_high(),
+                next_input.wait_for_high(),
+                Timer::after(Duration::from_secs(10)),
+            )
+            .await,
+            embassy_futures::select::Either3::Third(_)
+        )
     };
-    println!("Fetching {}", url);
 
-    let frame: Vec<Spectra6Color> =
-        match try_build_frame(net_stack, &url, panel_width, panel_height).await {
-            Ok(f) => f,
-            Err(msg) => {
-                println!("Falling back to error image: {}", msg);
-                error_image::render(panel_width, panel_height, &msg)
-            }
-        };
+    let hw = HardwareCtx {
+        spawner,
+        rtc,
+        wake_action,
+        wifi: peripherals.WIFI,
+        gpio_btn_refresh: gpio_btn_refresh.degrade(),
+        gpio_btn_previous: gpio_btn_previous.degrade(),
+        gpio_btn_next: gpio_btn_next.degrade(),
+        spi_bus: epd_spi_bus,
+        epd,
+        tft_enable,
+    };
 
-    // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
-    println!("Reset");
-    epd.reset(&mut embassy_time::Delay).await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
-    println!("Init");
-    epd.init(&mut epd_spi_bus).await.unwrap();
-    println!("Power on");
-    epd.power_on(&mut epd_spi_bus).await.unwrap();
-    println!("Update frame");
-    let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = panel::output_index_to_image_xy(idx);
-        frame[y * panel_width + x]
-    });
-    epd.update_frame(&mut epd_spi_bus, data).await.unwrap();
-    println!("Trigger refresh");
-    epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
-    println!("Wait until idle (~20s refresh)");
-    epd.wait_until_idle().await.unwrap();
-
-    println!("Power off");
-    epd.power_off(&mut epd_spi_bus).await.unwrap();
-
-    #[cfg(feature = "e1004")]
-    tft_enable.set_low();
-
-    println!("Done");
-    let _ = epd;
-    let _ = spawner;
-
-    println!("Deep sleep!");
-
-    let wakeup_pins: &mut [(
-        &mut dyn esp_hal::gpio::RtcPin,
-        esp_hal::rtc_cntl::sleep::WakeupLevel,
-    )] = &mut [
-        (&mut gpio_btn_refresh, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_btn_previous, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_btn_next, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-    ];
-    let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
-
-    let timer_wake_source =
-        esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(core::time::Duration::from_secs(10 * 60));
-    let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] =
-        &[&timer_wake_source, &pin_wake_source];
-
-    println!("Going to deep sleep :)");
-    rtc.sleep_deep(wake_sources);
+    if entering_config_mode {
+        main_config(hw).await
+    } else {
+        main_normal(
+            hw,
+            WifiCredentials {
+                ssid: wifi_ssid,
+                password: wifi_password,
+                base_url,
+            },
+        )
+        .await
+    }
 }

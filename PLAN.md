@@ -35,7 +35,7 @@ device enters **configuration mode**:
 Either of the following, evaluated at the top of `main()`:
 
 1. **No config stored** (first boot after a flash, or user reset).
-2. **Previous + Next physically held at boot for 30 s** — completely
+2. **Previous + Next physically held at boot for 10 s** — completely
    independent of the RTC latch / `WakeAction` machinery. Checked against
    the live GPIO levels so it works uniformly for any boot reason — cold
    power-on with both buttons held while flipping the switch, deep-sleep
@@ -49,7 +49,7 @@ Either of the following, evaluated at the top of `main()`:
    match select3(
        previous_input.wait_for_high(),   // Previous released
        next_input.wait_for_high(),       // Next released
-       Timer::after(Duration::from_secs(30)),
+       Timer::after(Duration::from_secs(10)),
    ).await {
        First(_) | Second(_) => (),       // fall through to normal flow
        Third(_)             => enter_config_mode(),
@@ -195,7 +195,7 @@ Each stage is a self-contained commit that leaves the firmware working.
 
 ### Stage 2 — config-mode trigger + placeholder
 
-- Replace the existing `TODO` placeholder for Previous+Next-held-30 s.
+- Replace the existing `TODO` placeholder for Previous+Next-held-10 s.
 - Add the "no stored config → enter config mode" path.
 - The actual body of config mode is still a stub (e.g. just logs "entering
   config mode" and sleeps), but the decision logic and the non-normal
