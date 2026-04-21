@@ -11,21 +11,6 @@ palette-index extraction changes. Worth also adding a guard so an
 unexpected bit depth or a non-indexed colour type surfaces as an
 error frame rather than corrupt pixels.
 
-## WiFi connection failure is invisible
-
-If the configured SSID / password is wrong, `wifi_task` loops on
-`connect_async()` forever (retrying every 5 s) and `main()` blocks on
-`net_stack.wait_link_up().await`, so the device is stuck with no output on
-the panel — same visible state as "still booting" from the user's
-perspective. Should be caught and surfaced: wrap the wait in a timeout
-(say 30 s from first attempt), and on timeout render an error frame via
-`error_image::render` explaining that WiFi connection failed (with
-instructions to enter config mode: "hold Previous+Next for 10 s to
-re-configure"), then go to deep sleep so we retry on the next wake rather
-than burning battery in the retry loop. Without this, dummy / mistyped
-credentials hang the device indefinitely — which is how I regularly lock
-myself out during on-device testing.
-
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so

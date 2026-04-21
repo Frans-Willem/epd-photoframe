@@ -135,6 +135,62 @@ fn determine_wake_action(
     }
 }
 
+/// Upper bound on how long `main_normal` will wait for the network to
+/// come up before giving up and rendering an error frame. Covers the
+/// "weak signal / DHCP stall" cases that don't surface as an outright
+/// auth error from `connect_async`.
+const WIFI_LINK_TIMEOUT: Duration = Duration::from_secs(30);
+
+enum NetworkError {
+    ConnectFailed(esp_radio::wifi::WifiError),
+    Timeout(Duration),
+}
+
+impl NetworkError {
+    fn message(&self, ssid: &str) -> String {
+        let hint = "To reconfigure, hold Previous+Next for 10 seconds \
+                    during the next boot.";
+        match self {
+            NetworkError::ConnectFailed(e) => format!(
+                "WiFi connect failed: {:?}\nSSID: {}\n\n{}",
+                e, ssid, hint
+            ),
+            NetworkError::Timeout(d) => format!(
+                "WiFi connect timed out after {} s.\nSSID: {}\n\n{}",
+                d.as_secs(),
+                ssid,
+                hint
+            ),
+        }
+    }
+}
+
+/// Wait for the network to get DHCP'd, with both a hard deadline and
+/// an early bail-out if `wifi_task` reports a connect failure (wrong
+/// password, SSID missing, etc.). Without the race, a bad SSID/password
+/// leaves the device hanging forever on `wait_link_up` while the retry
+/// loop cycles silently.
+async fn wait_for_network_ready(
+    stack: embassy_net::Stack<'_>,
+    timeout: Duration,
+) -> Result<(), NetworkError> {
+    use embassy_futures::select::{Either3, select3};
+    match select3(
+        async {
+            stack.wait_link_up().await;
+            stack.wait_config_up().await;
+        },
+        WIFI_CONNECT_FAILURE.wait(),
+        Timer::after(timeout),
+    )
+    .await
+    {
+        Either3::First(()) => Ok(()),
+        Either3::Second(e) => Err(NetworkError::ConnectFailed(e)),
+        Either3::Third(()) => Err(NetworkError::Timeout(timeout)),
+    }
+}
+
 /// The normal refresh flow: bring the panel up, optionally flash white for
 /// immediate feedback, connect to WiFi, fetch + decode the image, trigger
 /// the real refresh, then deep-sleep waking on either the 10-minute timer
@@ -182,27 +238,30 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     spawner.spawn(wifi_task(wifi_controller)).unwrap();
     spawner.spawn(net_task(net_runner)).unwrap();
 
-    println!("Waiting for network link...");
-    net_stack.wait_link_up().await;
-    println!("Link up, waiting for config up");
-    net_stack.wait_config_up().await;
-    println!("Network config up! {:?}", net_stack.config_v4());
-
-    // Build the request URL with the appropriate action query param.
-    let url: String = match wake_action.query() {
-        Some(q) => format!("{}{}", creds.base_url, q),
-        None => creds.base_url.clone(),
-    };
-    println!("Fetching {}", url);
-
-    let frame: Vec<Spectra6Color> =
-        match try_build_frame(net_stack, &url, panel_width, panel_height).await {
-            Ok(f) => f,
-            Err(msg) => {
-                println!("Falling back to error image: {}", msg);
-                error_image::render(panel_width, panel_height, &msg)
-            }
+    // Chain two stages that each might fail with a user-visible message:
+    //  1) wait for the network to come up (bounded by a timeout and a
+    //     fast bail-out on auth failure, so wrong creds don't brick the
+    //     device), and
+    //  2) fetch + decode the image.
+    // Any `Err` short-circuits to `error_image::render`, which then goes
+    // through the same panel-refresh path as a successful frame.
+    let frame_result: Result<Vec<Spectra6Color>, String> = async {
+        wait_for_network_ready(net_stack, WIFI_LINK_TIMEOUT)
+            .await
+            .map_err(|e| e.message(&creds.ssid))?;
+        let url: String = match wake_action.query() {
+            Some(q) => format!("{}{}", creds.base_url, q),
+            None => creds.base_url.clone(),
         };
+        println!("Fetching {}", url);
+        try_build_frame(net_stack, &url, panel_width, panel_height).await
+    }
+    .await;
+
+    let frame: Vec<Spectra6Color> = frame_result.unwrap_or_else(|msg| {
+        println!("Falling back to error image: {}", msg);
+        error_image::render(panel_width, panel_height, &msg)
+    });
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     println!("Reset");
@@ -268,6 +327,17 @@ async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Wifi
     runner.run().await
 }
 
+/// Latest `connect_async` failure (if any) from `wifi_task`, surfaced to
+/// `main_normal` so it can bail out with an error frame instead of
+/// hanging on `net_stack.wait_link_up()`. `main_normal` races this
+/// against link-up and a timeout; it only ever takes the signal once
+/// per boot, so overwriting on each retry is fine — whichever error is
+/// current when main notices wins.
+static WIFI_CONNECT_FAILURE: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    esp_radio::wifi::WifiError,
+> = embassy_sync::signal::Signal::new();
+
 #[embassy_executor::task]
 async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     println!("Start connection task");
@@ -288,6 +358,7 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
             }
             Err(e) => {
                 println!("Failed to connect to wifi: {e:?}");
+                WIFI_CONNECT_FAILURE.signal(e);
                 println!("Retry in 5sec");
                 Timer::after(Duration::from_secs(5)).await;
             }
