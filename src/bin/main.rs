@@ -23,6 +23,11 @@ use esp_backtrace as _;
 
 extern crate alloc;
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use reterminal_e100x::error_image;
 use reterminal_e100x::spectra6::Spectra6Color;
 
 #[cfg(feature = "e1002")]
@@ -177,7 +182,18 @@ static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
     static_cell::StaticCell::new();
 
 use embedded_io_async::BufRead;
-async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8> {
+
+/// Fetch a pre-quantised palette PNG from `WIFI_URL`, decode it, and map its
+/// palette entries onto `Spectra6Color`, returning a row-major frame buffer
+/// sized to match the panel. On any HTTP / content-type / PNG / sizing
+/// failure, returns a human-readable error message; `text/plain` responses
+/// are treated as server-side errors and their body is surfaced as the
+/// error message.
+async fn try_build_frame<'t>(
+    stack: embassy_net::Stack<'t>,
+    panel_width: usize,
+    panel_height: usize,
+) -> Result<Vec<Spectra6Color>, String> {
     let dns = embassy_net::dns::DnsSocket::new(stack);
     let tcp_state = embassy_net::tcp::client::TcpClientState::<1, 4096, 4096>::new();
     let tcp = embassy_net::tcp::client::TcpClient::new(stack, &tcp_state);
@@ -188,30 +204,106 @@ async fn get_image_data<'t>(stack: embassy_net::Stack<'t>) -> alloc::vec::Vec<u8
     let mut request = http_client
         .request(reqwless::request::Method::GET, URL)
         .await
-        .unwrap();
+        .map_err(|e| format!("HTTP request: {:?}", e))?;
+
     println!("HTTP request done?");
     let mut http_rx_buf = [0u8; 4096];
-    let mut response = request
+    let response = request
         .send(&mut http_rx_buf)
         .await
-        .unwrap()
-        .body()
-        .reader();
-    println!("Reading body");
+        .map_err(|e| format!("HTTP send: {:?}", e))?;
 
-    let mut body = alloc::vec::Vec::new();
+    let status = response.status;
+    let is_text_plain = matches!(
+        response.content_type,
+        Some(reqwless::headers::ContentType::TextPlain)
+    );
+
+    println!("Reading body");
+    let mut reader = response.body().reader();
+    let mut body: Vec<u8> = Vec::new();
     loop {
-        let chunk = response.fill_buf().await.unwrap();
+        let chunk = reader
+            .fill_buf()
+            .await
+            .map_err(|e| format!("HTTP read: {:?}", e))?;
         if chunk.is_empty() {
             break;
         }
+        body.try_reserve(chunk.len())
+            .map_err(|e| format!("OOM reading body at {} bytes: {:?}", body.len(), e))?;
         body.extend_from_slice(chunk);
-        let len = chunk.len();
-        response.consume(len);
+        let n = chunk.len();
+        reader.consume(n);
     }
     body.shrink_to_fit();
-    println!("Got body");
-    body
+    println!("Got body ({} bytes)", body.len());
+
+    if !status.is_successful() {
+        let body_str = core::str::from_utf8(&body).unwrap_or("<non-utf8 body>");
+        return Err(format!("HTTP {}: {}", status.0, body_str));
+    }
+    if is_text_plain {
+        let body_str = core::str::from_utf8(&body).unwrap_or("<non-utf8 body>");
+        return Err(format!("Server: {}", body_str));
+    }
+
+    println!("Decode PNG");
+    let header = minipng::decode_png_header(&body)
+        .map_err(|e| format!("PNG header: {:?}", e))?;
+    let required = header.required_bytes();
+    let mut decode_buf: Vec<u8> = Vec::new();
+    decode_buf
+        .try_reserve_exact(required)
+        .map_err(|e| format!("OOM decode buffer ({} bytes): {:?}", required, e))?;
+    decode_buf.resize(required, 0);
+    let image = minipng::decode_png(&body, &mut decode_buf)
+        .map_err(|e| format!("PNG decode: {:?}", e))?;
+    println!("Decoded PNG");
+    println!(
+        "Image: {}x{} {:?} {:?}",
+        image.width(),
+        image.height(),
+        image.color_type(),
+        image.bit_depth()
+    );
+
+    if image.width() as usize != panel_width || image.height() as usize != panel_height {
+        return Err(format!(
+            "Image {}x{} does not match panel {}x{}",
+            image.width(),
+            image.height(),
+            panel_width,
+            panel_height
+        ));
+    }
+
+    let png_palette: Vec<Spectra6Color> = (0..=255)
+        .map(|index| image.palette(index))
+        .map(|rgba| {
+            let rgb: [u8; 3] = [rgba[0], rgba[1], rgba[2]];
+            let best = PALETTE
+                .iter()
+                .enumerate()
+                .map(|(i, ref_rgb)| (i, color_distance(ref_rgb, &rgb)))
+                .reduce(|a, b| if a.1 < b.1 { a } else { b })
+                .unwrap();
+            PALETTE_COLORS[best.0]
+        })
+        .collect();
+
+    let frame_len = panel_width * panel_height;
+    let mut frame: Vec<Spectra6Color> = Vec::new();
+    frame
+        .try_reserve_exact(frame_len)
+        .map_err(|e| format!("OOM frame buffer ({} bytes): {:?}", frame_len, e))?;
+    for y in 0..panel_height {
+        let row_start = y * image.bytes_per_row();
+        for x in 0..panel_width {
+            frame.push(png_palette[image.pixels()[row_start + x] as usize]);
+        }
+    }
+    Ok(frame)
 }
 
 #[esp_rtos::main]
@@ -302,42 +394,18 @@ async fn main(spawner: Spawner) -> ! {
     net_stack.wait_config_up().await;
     println!("Network config up! {:?}", net_stack.config_v4());
 
-    let png_data = get_image_data(net_stack).await;
-    println!("Decode PNG");
-    let mut buffer = alloc::vec::Vec::new();
-    let header =
-        minipng::decode_png_header(png_data.as_slice()).expect("Unable to decode PNG header");
-    buffer.resize(header.required_bytes(), 0);
-    let image =
-        minipng::decode_png(png_data.as_slice(), &mut buffer).expect("Unable to decode PNG");
-    println!("Decoded PNG");
-    // TODO: Check color type is indexed and bit depth is 8.
-    println!(
-        "Image: {}x{} {:?} {:?}",
-        image.width(),
-        image.height(),
-        image.color_type(),
-        image.bit_depth()
-    );
-
-    let png_palette: alloc::vec::Vec<Spectra6Color> = (0..=255)
-        .map(|index| image.palette(index))
-        .map(|rgba| {
-            let rgb: [u8; 3] = [rgba[0], rgba[1], rgba[2]];
-            let best = PALETTE
-                .iter()
-                .enumerate()
-                .map(|(i, ref_rgb)| (i, color_distance(ref_rgb, &rgb)))
-                .reduce(|a, b| if a.1 < b.1 { a } else { b })
-                .unwrap();
-            PALETTE_COLORS[best.0]
-        })
-        .collect();
-
     let (panel_width, panel_height) = panel::panel_size();
+    let frame: Vec<Spectra6Color> = match try_build_frame(net_stack, panel_width, panel_height).await {
+        Ok(f) => f,
+        Err(msg) => {
+            println!("Falling back to error image: {}", msg);
+            error_image::render(panel_width, panel_height, &msg)
+        }
+    };
+
     let data = (0..(panel_width * panel_height)).map(|idx| {
         let (x, y) = panel::output_index_to_image_xy(idx);
-        png_palette[image.pixels()[(y * image.bytes_per_row()) + x] as usize]
+        frame[y * panel_width + x]
     });
 
     // --- SPI bus and panel driver setup (device-specific) ---
