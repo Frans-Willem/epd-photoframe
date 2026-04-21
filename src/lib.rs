@@ -13,6 +13,7 @@ pub mod config_mode;
 pub mod error_image;
 pub mod gdep073e01;
 pub mod hardware;
+pub mod portal;
 pub mod qr_image;
 pub mod spectra6;
 pub mod t133a01;

@@ -69,8 +69,10 @@ qrcodegen-no-heap = "1.8.1"
 leasehund = "0.3.0"
 heapless = { version = "0.8", default-features = false }
 edge-captive = { version = "0.7.0", default-features = false, features = ["io"] }
+edge-http = { version = "0.7.0", default-features = false, features = ["io"] }
+embassy-sync = { version = "0.7", default-features = false }
 edge-nal = "0.6"
-edge-nal-embassy = { version = "0.8.1", default-features = false, features = ["udp", "proto-ipv4"] }
+edge-nal-embassy = { version = "0.8.1", default-features = false, features = ["tcp", "udp", "proto-ipv4"] }
 
 [profile.dev]
 # Rust debug is too slow.

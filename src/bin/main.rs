@@ -496,23 +496,18 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
-    // Load runtime configuration from NVS. If any required key is absent,
-    // config mode is the only sensible destination — there's no point
-    // attempting a WiFi association without an SSID — so we `None` out
-    // `creds` here and short-circuit the button race below. This also
-    // means a freshly-flashed device enters config mode on first boot
-    // without the user needing to know the Previous+Next chord.
-    let mut config = match Config::new(peripherals.FLASH) {
-        Ok(c) => Some(c),
-        Err(e) => {
-            println!("NVS init failed ({:?}); entering config mode", e);
-            None
-        }
-    };
+    // Load runtime configuration from NVS. A fresh / blank partition is
+    // not an error (esp-nvs treats all-0xFF as "no entries yet"), so the
+    // only ways `Config::new` fails are programming bugs (wrong partition
+    // offset/size) or actual flash hardware trouble — panicking there is
+    // the right call. A missing *key* is different: that's how we detect
+    // "needs configuring" and short-circuit into config mode below.
+    let mut config =
+        Config::new(peripherals.FLASH).expect("NVS init failed — check partition table and flash");
     let creds = match (
-        config.as_mut().and_then(|c| c.wifi_ssid().ok().flatten()),
-        config.as_mut().and_then(|c| c.wifi_password().ok().flatten()),
-        config.as_mut().and_then(|c| c.image_url().ok().flatten()),
+        config.wifi_ssid().ok().flatten(),
+        config.wifi_password().ok().flatten(),
+        config.image_url().ok().flatten(),
     ) {
         (Some(ssid), Some(password), Some(base_url)) => {
             println!(
@@ -678,6 +673,6 @@ async fn main(spawner: Spawner) -> ! {
     {
         main_normal(hw, creds).await
     } else {
-        config_mode::run(hw).await
+        config_mode::run(hw, config).await
     }
 }

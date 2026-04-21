@@ -52,24 +52,35 @@ binary via `env!`. They should be user-configurable at runtime, most
 likely via a WiFi access-point captive portal (see the Previous+Next
 10-second-hold placeholder in `main.rs`).
 
-## Unify config-mode networking on the `edge-net` stack
+## Unify networking on the `edge-net` stack
 
-Config mode currently mixes three unrelated networking crates:
-`leasehund` for DHCP, `picoserve` for HTTP, `edge-captive` (part of the
-`edge-net` family) for DNS. The `edge-net` family ships its own DHCP
-server (`edge-dhcp`) and HTTP server (`edge-http`), all built on the
-same `edge-nal` abstraction, so swapping `leasehund` → `edge-dhcp` and
-`picoserve` → `edge-http` would let us drop the raw embassy-net UDP
-usage in favour of a single `edge_nal_embassy::Udp` / `Tcp` for all
-three services. Pros: fewer unrelated deps, consistent error types,
-fewer buffer pools to size. Cons: `edge-http` is less ergonomic than
-`picoserve`'s router / extractors (more manual request parsing), and
-we'd still carry the `picoserve` vs `edge-http` tradeoff for future
-features like JSON endpoints.
+We currently mix unrelated networking crates across both modes:
 
-Worth a concrete prototype once Stage 3c is stable — if the edge-net
-form handler is small enough, the dep simplification is probably
-worth the ergonomics hit.
+- Config mode: `leasehund` (DHCP), `edge-captive` (DNS), and — at the
+  time of writing — about to add an HTTP portal.
+- Normal mode: `reqwless` for the image-fetch HTTP client.
+
+The `edge-net` family ships `edge-dhcp` (DHCP server), `edge-captive`
+(DNS — already in use), `edge-http` (server *and* client), and
+`edge-mdns`, all built on the same `edge-nal` abstraction we already
+pull in via `edge-nal-embassy`. Swapping each of the non-edge-net
+crates for its edge-net counterpart would collapse the dep graph onto a
+single networking trait and buffer-pool style.
+
+Concrete migrations to evaluate together:
+
+1. **`leasehund` → `edge-dhcp`** (config-mode DHCP server).
+2. **`picoserve` → `edge-http` server** for the config portal — see the
+   Stage 3c choice made in PLAN.md; if the ergonomics pan out, this is
+   already aligned with the rest of the plan.
+3. **`reqwless` → `edge-http` client** for the normal-flow image fetch.
+   This is the bigger ergonomics hit (we'd lose reqwless's body reader
+   + content-type parsing), so it depends on how painful the config-
+   portal's `edge-http` server code ends up being.
+
+Worth prototyping all three once Stage 3c is stable — if the per-crate
+code size stays reasonable, the dep simplification + consistent error
+types are probably worth it.
 
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 

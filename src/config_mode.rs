@@ -11,8 +11,10 @@ use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
 use esp_println::println;
 
+use crate::config::Config;
 use crate::config_image;
 use crate::hardware::HardwareCtx;
+use crate::portal;
 
 #[cfg(feature = "e1002")]
 use crate::gdep073e01 as panel;
@@ -22,12 +24,17 @@ use crate::t133a01 as panel;
 /// Per-mode static resources — kept local to this module so the normal
 /// flow can have its own without cross-referencing. Only one of the two
 /// modes runs per boot, so duplicating them in `.bss` is cheap.
-static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<4>> =
+// Socket budget: 1 DHCP + 1 DNS + up to `web_task`'s handler-task pool
+// (4) of live HTTP connections, plus slack so probe bursts don't panic.
+// Each slot is small (smoltcp socket metadata only — the TCP rx/tx rings
+// live in the separate `TcpBuffers` pool), so 10 costs us on the order
+// of ~1 KB extra RAM.
+static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<10>> =
     static_cell::ConstStaticCell::new(embassy_net::StackResources::new());
 static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
     static_cell::StaticCell::new();
 
-pub async fn run(ctx: HardwareCtx) -> ! {
+pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     let HardwareCtx {
         spawner,
         wifi,
@@ -80,6 +87,7 @@ pub async fn run(ctx: HardwareCtx) -> ! {
     spawner.spawn(net_task(net_runner)).unwrap();
     spawner.spawn(dhcp_server_task(net_stack)).unwrap();
     spawner.spawn(dns_hijack_task(net_stack)).unwrap();
+    spawner.spawn(portal::web_task(net_stack)).unwrap();
 
     // --- Panel content: QR + instructions. The QR encodes a WiFi-join URI
     // so most phones' camera-app scanners offer a one-tap "Join network"
@@ -124,10 +132,33 @@ pub async fn run(ctx: HardwareCtx) -> ! {
         tft.set_low();
     }
 
-    println!("[STAGE 3b] AP + DHCP up; QR displayed; blocking in config mode.");
-    loop {
-        Timer::after(Duration::from_secs(3600)).await;
+    // Wait for the portal to hand us a credentials blob, then write it
+    // to NVS and reset. A failure to write is logged but we reset anyway
+    // — on the next boot either the new values land (partial success)
+    // or we re-enter config mode (NVS still incomplete) and the user
+    // retries. Either way, we don't want to be stuck in a black hole
+    // after the user pressed "Save".
+    println!("Config mode ready — awaiting save from the HTTP portal.");
+    let creds = portal::SAVE_SIGNAL.wait().await;
+    println!(
+        "Saving config to NVS: ssid={:?}, url={:?}",
+        creds.ssid, creds.url
+    );
+    if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
+        println!("WARNING: failed to write wifi.ssid: {:?}", e);
     }
+    if let Err(e) = nvs.set_wifi_password(&creds.password) {
+        println!("WARNING: failed to write wifi.pass: {:?}", e);
+    }
+    if let Err(e) = nvs.set_image_url(&creds.url) {
+        println!("WARNING: failed to write image.url: {:?}", e);
+    }
+
+    // Give the HTTP response a moment to flush before we reboot.
+    Timer::after(Duration::from_millis(500)).await;
+
+    println!("Rebooting to apply new config");
+    esp_hal::system::software_reset();
 }
 
 #[embassy_executor::task]
