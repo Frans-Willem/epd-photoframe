@@ -46,9 +46,10 @@ configured URL.
 
 References
 ----------
-Schematics (mostly identical; differ in which FPC eInk connector is populated):
+Schematics (ESP32-S3 based, similar peripherals, differ in panel pinout):
 - E1001: https://files.seeedstudio.com/wiki/reterminal_e10xx/res/202004307_reTerminal_E1001_V1.0_SCH_250805.pdf
 - E1002: https://files.seeedstudio.com/wiki/reterminal_e10xx/res/202004321_reTerminal_E1002_V1.0_SCH_250805.pdf
+- E1004: https://files.seeedstudio.com/wiki/reterminal_e10xx/res/202004523_reTerminal%20E1004_V1.0_SCH_260105.pdf
 
 Panels:
 - E1001: GooDisplay GDEY075T7 — https://www.good-display.com/product/396.html
