@@ -34,7 +34,13 @@ device enters **configuration mode**:
 
 Either of the following, evaluated at the top of `main()`:
 
-1. **No config stored** (first boot after a flash, or user reset).
+1. **No config stored** (first boot after a flash, or user reset). If any
+   required NVS key (`wifi.ssid`, `wifi.pass`, `image.url`) is absent after
+   the NVS read, skip the button race entirely and enter config mode
+   unconditionally — there's no point attempting a WiFi association
+   against a missing SSID, and without this the user has to know to hold
+   two buttons at first boot.
+
 2. **Previous + Next physically held at boot for 10 s** — completely
    independent of the RTC latch / `WakeAction` machinery. Checked against
    the live GPIO levels so it works uniformly for any boot reason — cold

@@ -224,13 +224,14 @@ struct WifiCredentials {
     base_url: String,
 }
 
-/// Stage 2 placeholder for the real configuration-mode body. Stage 3 will
-/// replace this with the WiFi AP + captive portal + QR code on the panel,
-/// ending in a software reset. For now it just blocks forever so the device
-/// stays visibly "in config mode" (LED blinking, nothing else happening)
-/// until the user power-cycles.
+/// Configuration-mode body: bring up a WiFi AP + DHCP server, render a QR
+/// code + textual instructions on the panel, then block. Stage 3c will
+/// layer DNS hijack + an HTTP captive-portal form on top of the same AP
+/// and trigger a software reset on save.
 async fn main_config(ctx: HardwareCtx) -> ! {
     let HardwareCtx {
+        spawner,
+        wifi,
         mut spi_bus,
         mut epd,
         mut tft_enable,
@@ -238,23 +239,69 @@ async fn main_config(ctx: HardwareCtx) -> ! {
     } = ctx;
     let (panel_width, panel_height) = panel::panel_size();
 
-    // Stage 3a: draw a placeholder QR code + instructions. Stage 3b will
-    // replace the payload with the real WiFi provisioning URI once the
-    // AP is up, and replace the text with the real SSID + portal URL.
-    let payload = "http://reterminal-setup.local/";
-    let instructions =
+    // --- Bring up WiFi in AP mode. The AP MAC is stable per-device, so we
+    // derive a user-recognisable SSID suffix from its last two bytes. ---
+    let radio_init = RADIO_CONTROLLER
+        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
+    let (mut wifi_controller, interfaces) =
+        esp_radio::wifi::new(radio_init, wifi, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+    let ap_device = interfaces.ap;
+
+    let ap_mac = esp_radio::wifi::ap_mac();
+    let ap_ssid = format!("reTerminal-setup-{:02X}{:02X}", ap_mac[4], ap_mac[5]);
+    println!("AP SSID: {}", ap_ssid);
+
+    let ap_mode_config = esp_radio::wifi::ModeConfig::AccessPoint(
+        esp_radio::wifi::AccessPointConfig::default()
+            .with_ssid(ap_ssid.clone())
+            .with_auth_method(esp_radio::wifi::AuthMethod::None),
+    );
+    wifi_controller.set_config(&ap_mode_config).unwrap();
+
+    // --- Static embassy-net stack on the AP interface. 192.168.4.1/24 is
+    // the ESP-IDF softap convention; keeping it here means the portal URL
+    // is predictable for users who miss the QR scan. ---
+    let ap_addr = core::net::Ipv4Addr::new(192, 168, 4, 1);
+    let mut dns_servers = heapless::Vec::new();
+    let _ = dns_servers.push(ap_addr);
+    let static_config = embassy_net::StaticConfigV4 {
+        address: embassy_net::Ipv4Cidr::new(ap_addr, 24),
+        gateway: Some(ap_addr),
+        dns_servers,
+    };
+    let net_config = embassy_net::Config::ipv4_static(static_config);
+
+    let rng = esp_hal::rng::Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+    let (net_stack, net_runner) =
+        embassy_net::new(ap_device, net_config, NETWORK_RESOURCES.take(), seed);
+
+    spawner.spawn(ap_wifi_task(wifi_controller)).unwrap();
+    spawner.spawn(net_task(net_runner)).unwrap();
+    spawner.spawn(dhcp_server_task(net_stack)).unwrap();
+
+    // --- Panel content: QR + instructions. The QR encodes a WiFi-join URI
+    // so most phones' camera-app scanners offer a one-tap "Join network"
+    // action; the text below it gives the SSID (for manual entry) and the
+    // portal URL (for users whose phones don't surface the captive-portal
+    // popup yet — Stage 3c). ---
+    let payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
+    let instructions = format!(
         "reTerminal Setup\n\n\
-         Scan the QR code or\n\
-         connect to WiFi:\n\
-         reTerminal-setup\n\n\
-         Then open\n\
-         http://reterminal-setup.local/";
+         Scan the QR code, or\n\
+         join WiFi:\n\
+         {}\n\n\
+         Then open:\n\
+         http://192.168.4.1/",
+        ap_ssid
+    );
     println!("Rendering config screen with QR: {}", payload);
     let frame = reterminal_e100x::config_image::render(
         panel_width,
         panel_height,
-        payload,
-        instructions,
+        &payload,
+        &instructions,
     );
 
     println!("Reset");
@@ -282,7 +329,7 @@ async fn main_config(ctx: HardwareCtx) -> ! {
         tft.set_low();
     }
 
-    println!("[STAGE 3a] QR displayed; blocking in config mode.");
+    println!("[STAGE 3b] AP + DHCP up; QR displayed; blocking in config mode.");
     loop {
         Timer::after(Duration::from_secs(3600)).await;
     }
@@ -446,6 +493,41 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
             }
         }
     }
+}
+
+/// Start the WiFi controller in AP mode and keep it alive. `start_async`
+/// internally waits for `WifiEvent::ApStart`, so by the time it returns
+/// the AP is advertising and accepting associations. The controller must
+/// not be dropped while we want the AP to stay up, hence the idle loop.
+#[embassy_executor::task]
+async fn ap_wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
+    println!("Starting WiFi in AP mode");
+    controller.start_async().await.unwrap();
+    println!("AP started");
+    loop {
+        // Log association events as they come in; they're useful for
+        // verifying a phone actually joined the portal network.
+        controller
+            .wait_for_event(esp_radio::wifi::WifiEvent::ApStaConnected)
+            .await;
+        println!("AP: station connected");
+    }
+}
+
+/// Serve DHCP on the AP interface so phones joining the captive-portal
+/// network get an IP address immediately (otherwise modern phones time out
+/// the join and drop the network as "no internet"). `run` loops forever.
+#[embassy_executor::task]
+async fn dhcp_server_task(stack: embassy_net::Stack<'static>) {
+    let mut server = leasehund::DhcpServer::<8, 1>::new_with_dns(
+        core::net::Ipv4Addr::new(192, 168, 4, 1),   // server IP
+        core::net::Ipv4Addr::new(255, 255, 255, 0), // subnet mask
+        core::net::Ipv4Addr::new(192, 168, 4, 1),   // gateway
+        core::net::Ipv4Addr::new(192, 168, 4, 1),   // DNS (self; hijack lands in Stage 3c)
+        core::net::Ipv4Addr::new(192, 168, 4, 100), // pool start
+        core::net::Ipv4Addr::new(192, 168, 4, 200), // pool end
+    );
+    server.run(stack).await
 }
 
 static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<4>> =
@@ -637,7 +719,7 @@ async fn main(spawner: Spawner) -> ! {
         next_latched,
     );
 
-    let mut rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
+    let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
     let time_since_boot = rtc.time_since_boot();
     println!(
         "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
@@ -649,47 +731,42 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
-    // Load runtime configuration from NVS. Any missing value falls back to
-    // the compile-time `env!()` default so dev builds keep working before
-    // the captive-portal provisioning flow lands; these fallbacks go away
-    // at the end of Stage 3 (see PLAN.md).
+    // Load runtime configuration from NVS. If any required key is absent,
+    // config mode is the only sensible destination — there's no point
+    // attempting a WiFi association without an SSID — so we `None` out
+    // `creds` here and short-circuit the button race below. This also
+    // means a freshly-flashed device enters config mode on first boot
+    // without the user needing to know the Previous+Next chord.
     let mut config = match Config::new(peripherals.FLASH) {
         Ok(c) => Some(c),
         Err(e) => {
-            println!(
-                "NVS init failed ({:?}); falling back to compile-time defaults",
-                e
-            );
+            println!("NVS init failed ({:?}); entering config mode", e);
             None
         }
     };
-    let wifi_ssid = config
-        .as_mut()
-        .and_then(|c| c.wifi_ssid().ok().flatten())
-        .unwrap_or_else(|| {
-            println!("wifi.ssid: not in NVS, using compile-time default");
-            String::from(env!("WIFI_SSID"))
-        });
-    let wifi_password = config
-        .as_mut()
-        .and_then(|c| c.wifi_password().ok().flatten())
-        .unwrap_or_else(|| {
-            println!("wifi.pass: not in NVS, using compile-time default");
-            String::from(env!("WIFI_PASSWORD"))
-        });
-    let base_url = config
-        .as_mut()
-        .and_then(|c| c.image_url().ok().flatten())
-        .unwrap_or_else(|| {
-            println!("image.url: not in NVS, using compile-time default");
-            String::from(env!("WIFI_URL"))
-        });
-    println!(
-        "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?}",
-        wifi_ssid,
-        wifi_password.len(),
-        base_url
-    );
+    let creds = match (
+        config.as_mut().and_then(|c| c.wifi_ssid().ok().flatten()),
+        config.as_mut().and_then(|c| c.wifi_password().ok().flatten()),
+        config.as_mut().and_then(|c| c.image_url().ok().flatten()),
+    ) {
+        (Some(ssid), Some(password), Some(base_url)) => {
+            println!(
+                "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?}",
+                ssid,
+                password.len(),
+                base_url
+            );
+            Some(WifiCredentials {
+                ssid,
+                password,
+                base_url,
+            })
+        }
+        _ => {
+            println!("NVS config incomplete; forcing config mode");
+            None
+        }
+    };
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
@@ -791,17 +868,14 @@ async fn main(spawner: Spawner) -> ! {
         epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
     }
 
-    // Race a 10-second timer against either Previous or Next being released.
-    // If both were held at boot and stay held for the whole window, the
-    // timer wins and we enter configuration mode. If either (or both) was
-    // never pressed, `wait_for_high` resolves immediately because the pin
-    // is already high, so normally this block completes in microseconds.
-    //
-    // ("No stored config → enter config mode" is deliberately NOT wired up
-    // in Stage 2: the `env!()` fallback still provides working values for
-    // dev builds. Stage 3, when the captive portal can actually accept
-    // input, will add that second trigger and drop the `env!()` fallback.)
-    let entering_config_mode = {
+    // If NVS didn't produce a full set of credentials we go straight to
+    // config mode without the button race. Otherwise: race a 10-second
+    // timer against either Previous or Next being released — if both were
+    // held at boot and stay held for the whole window, the timer wins and
+    // we enter configuration mode. If either (or both) was never pressed,
+    // `wait_for_high` resolves immediately because the pin is already high,
+    // so normally this block completes in microseconds.
+    let entering_config_mode = creds.is_none() || {
         let mut prev_input = Input::new(
             gpio_btn_previous.reborrow(),
             InputConfig::default().with_pull(Pull::Up),
@@ -834,17 +908,11 @@ async fn main(spawner: Spawner) -> ! {
         tft_enable,
     };
 
-    if entering_config_mode {
-        main_config(hw).await
+    if let Some(creds) = creds
+        && !entering_config_mode
+    {
+        main_normal(hw, creds).await
     } else {
-        main_normal(
-            hw,
-            WifiCredentials {
-                ssid: wifi_ssid,
-                password: wifi_password,
-                base_url,
-            },
-        )
-        .await
+        main_config(hw).await
     }
 }
