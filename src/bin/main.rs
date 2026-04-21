@@ -109,26 +109,37 @@ impl WakeAction {
 
 fn determine_wake_action(
     wake_reason: SleepSource,
-    refresh_held: bool,
-    previous_held: bool,
-    next_held: bool,
+    refresh_latched: bool,
+    previous_latched: bool,
+    next_latched: bool,
 ) -> WakeAction {
     match wake_reason {
         SleepSource::Undefined => WakeAction::FreshBoot,
         SleepSource::Timer => WakeAction::Timer,
-        // Ext1 (RtcioWakeupSource) and anything else non-timer: treat as a
-        // button wake. If a button is still held we trust it; otherwise fall
-        // back to Refresh (the user may have released before we could read).
-        _ => {
-            if refresh_held {
+        // `RtcioWakeupSource` on the ESP32-S3 reports as `Gpio`. The
+        // RTC-IO interrupt latch authoritatively tells us which button(s)
+        // triggered the wake, even if the user has already released.
+        SleepSource::Gpio => {
+            if refresh_latched {
                 WakeAction::Refresh
-            } else if next_held {
+            } else if next_latched {
                 WakeAction::Next
-            } else if previous_held {
+            } else if previous_latched {
                 WakeAction::Previous
             } else {
+                println!(
+                    "WARNING: Gpio wake with no button bit latched; \
+                     defaulting to Refresh"
+                );
                 WakeAction::Refresh
             }
+        }
+        other => {
+            println!(
+                "WARNING: unexpected wake reason {:?}; treating as fresh boot",
+                other
+            );
+            WakeAction::FreshBoot
         }
     }
 }
@@ -332,19 +343,49 @@ async fn main(spawner: Spawner) -> ! {
     )
     .is_low();
 
-    // Map raw GPIO states to semantic labels (silkscreen order differs per device).
+    // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
+    // and clear it immediately so stale bits don't carry into the next cycle.
+    // The latch is authoritative because it captures the pin state at the
+    // exact moment of wake — even a sub-millisecond tap is recorded, whereas
+    // the current-level read above misses anything released during the
+    // ~300 ms bootloader window.
+    let rtc_io = esp_hal::peripherals::RTC_IO::regs();
+    let rtc_gpio_int_mask = rtc_io.rtc_gpio_status().read().int().bits();
+    const BUTTON_BITS: u32 = (1 << 3) | (1 << 4) | (1 << 5);
+    rtc_io
+        .rtc_gpio_status_w1tc()
+        .write(|w| unsafe { w.rtc_gpio_status_int_w1tc().bits(BUTTON_BITS) });
+
+    let k0_latched = (rtc_gpio_int_mask & (1 << 3)) != 0;
+    let k1_latched = (rtc_gpio_int_mask & (1 << 4)) != 0;
+    let k2_latched = (rtc_gpio_int_mask & (1 << 5)) != 0;
+
+    // Map both raw held and raw latched states to semantic labels
+    // (silkscreen order differs per device).
     #[cfg(feature = "e1002")]
     let (refresh_held, previous_held, next_held) = (k0_held, k2_held, k1_held);
+    #[cfg(feature = "e1002")]
+    let (refresh_latched, previous_latched, next_latched) =
+        (k0_latched, k2_latched, k1_latched);
     #[cfg(feature = "e1004")]
     let (refresh_held, previous_held, next_held) = (k2_held, k1_held, k0_held);
+    #[cfg(feature = "e1004")]
+    let (refresh_latched, previous_latched, next_latched) =
+        (k2_latched, k1_latched, k0_latched);
 
-    let wake_action = determine_wake_action(wake_reason, refresh_held, previous_held, next_held);
+    let wake_action = determine_wake_action(
+        wake_reason,
+        refresh_latched,
+        previous_latched,
+        next_latched,
+    );
 
     let mut rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
     let time_since_boot = rtc.time_since_boot();
     println!(
         "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
-         buttons[refresh={refresh_held} previous={previous_held} next={next_held}] \
+         latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
+         held[refresh={refresh_held} previous={previous_held} next={next_held}] \
          uptime={time_since_boot:?}"
     );
 

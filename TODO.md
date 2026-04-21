@@ -1,21 +1,5 @@
 # TODO
 
-## Button-press latency on wake
-
-The ESP-IDF second-stage bootloader takes ~300 ms from power-up to when our
-app starts and can read GPIO state. Short button taps that are released
-before that point fall through to the "no button still held" branch, and
-the app defaults to assuming Refresh was pressed.
-
-Workaround for now: hold the button until the screen starts flashing (the
-white pre-flash is visual confirmation that the press was captured).
-
-Future: research running a small code stub before the second-stage
-bootloader — likely either via an ULP program or a deep-sleep wake stub
-registered with `esp_deep_sleep_register_hook()` — that can latch the
-wake-triggering GPIO into RTC memory so the main app can recover it even
-if the button is already released by the time app code runs.
-
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
