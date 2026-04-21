@@ -11,7 +11,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 
-use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::gpio::{Input, InputConfig, Pin, Pull};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_println::println;
 
@@ -105,6 +105,27 @@ impl WakeAction {
     fn show_white_flash(self) -> bool {
         !matches!(self, WakeAction::Timer)
     }
+}
+
+/// Read the RTC-IO interrupt status register (the wake latch) masked to the
+/// caller's bits of interest, clear those same bits via the register's
+/// write-1-to-clear sibling, and return the pre-clear masked value. Other
+/// bits in the register are neither read back nor touched.
+///
+/// Wraps the single `unsafe` the PAC mandates for this register: svd2rust
+/// marks `RTC_GPIO_STATUS_W1TC` with `Safety = Unsafe` because it can't
+/// statically verify field-value semantics, but writing any `u32` mask to
+/// a write-1-to-clear status register only flips hardware status bits in
+/// the RTC domain and cannot violate memory safety.
+fn read_and_clear_rtc_gpio_wake_status(mask: u32) -> u32 {
+    let rtc_io = esp_hal::peripherals::RTC_IO::regs();
+    let value = rtc_io.rtc_gpio_status().read().int().bits() & mask;
+    unsafe {
+        rtc_io
+            .rtc_gpio_status_w1tc()
+            .write(|w| w.rtc_gpio_status_int_w1tc().bits(mask));
+    }
+    value
 }
 
 fn determine_wake_action(
@@ -322,23 +343,31 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // Bind semantic button names to the device-specific GPIOs. This is the
+    // only place where the silkscreen-to-GPIO mapping appears; everything
+    // downstream uses the `gpio_btn_*` handles (and their `.number()`) so
+    // the rest of main() is device-agnostic.
+    #[cfg(feature = "e1002")]
+    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
+        (peripherals.GPIO3, peripherals.GPIO5, peripherals.GPIO4);
+    #[cfg(feature = "e1004")]
+    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
+        (peripherals.GPIO5, peripherals.GPIO4, peripherals.GPIO3);
+
     // Read all three buttons ASAP so we capture the press even if the user
     // releases quickly after powering the device out of deep sleep.
-    let mut gpio_k0 = peripherals.GPIO3;
-    let mut gpio_k1 = peripherals.GPIO4;
-    let mut gpio_k2 = peripherals.GPIO5;
-    let k0_held = Input::new(
-        gpio_k0.reborrow(),
+    let refresh_held = Input::new(
+        gpio_btn_refresh.reborrow(),
         InputConfig::default().with_pull(Pull::Up),
     )
     .is_low();
-    let k1_held = Input::new(
-        gpio_k1.reborrow(),
+    let previous_held = Input::new(
+        gpio_btn_previous.reborrow(),
         InputConfig::default().with_pull(Pull::Up),
     )
     .is_low();
-    let k2_held = Input::new(
-        gpio_k2.reborrow(),
+    let next_held = Input::new(
+        gpio_btn_next.reborrow(),
         InputConfig::default().with_pull(Pull::Up),
     )
     .is_low();
@@ -349,29 +378,14 @@ async fn main(spawner: Spawner) -> ! {
     // exact moment of wake — even a sub-millisecond tap is recorded, whereas
     // the current-level read above misses anything released during the
     // ~300 ms bootloader window.
-    let rtc_io = esp_hal::peripherals::RTC_IO::regs();
-    let rtc_gpio_int_mask = rtc_io.rtc_gpio_status().read().int().bits();
-    const BUTTON_BITS: u32 = (1 << 3) | (1 << 4) | (1 << 5);
-    rtc_io
-        .rtc_gpio_status_w1tc()
-        .write(|w| unsafe { w.rtc_gpio_status_int_w1tc().bits(BUTTON_BITS) });
+    let button_bits = (1u32 << gpio_btn_refresh.number())
+        | (1u32 << gpio_btn_previous.number())
+        | (1u32 << gpio_btn_next.number());
+    let rtc_gpio_int_mask = read_and_clear_rtc_gpio_wake_status(button_bits);
 
-    let k0_latched = (rtc_gpio_int_mask & (1 << 3)) != 0;
-    let k1_latched = (rtc_gpio_int_mask & (1 << 4)) != 0;
-    let k2_latched = (rtc_gpio_int_mask & (1 << 5)) != 0;
-
-    // Map both raw held and raw latched states to semantic labels
-    // (silkscreen order differs per device).
-    #[cfg(feature = "e1002")]
-    let (refresh_held, previous_held, next_held) = (k0_held, k2_held, k1_held);
-    #[cfg(feature = "e1002")]
-    let (refresh_latched, previous_latched, next_latched) =
-        (k0_latched, k2_latched, k1_latched);
-    #[cfg(feature = "e1004")]
-    let (refresh_held, previous_held, next_held) = (k2_held, k1_held, k0_held);
-    #[cfg(feature = "e1004")]
-    let (refresh_latched, previous_latched, next_latched) =
-        (k2_latched, k1_latched, k0_latched);
+    let refresh_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_refresh.number())) != 0;
+    let previous_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_previous.number())) != 0;
+    let next_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_next.number())) != 0;
 
     let wake_action = determine_wake_action(
         wake_reason,
@@ -581,9 +595,9 @@ async fn main(spawner: Spawner) -> ! {
         &mut dyn esp_hal::gpio::RtcPin,
         esp_hal::rtc_cntl::sleep::WakeupLevel,
     )] = &mut [
-        (&mut gpio_k0, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_k1, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_k2, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_btn_refresh, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_btn_previous, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_btn_next, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
     ];
     let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
 
