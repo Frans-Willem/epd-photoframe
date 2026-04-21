@@ -222,6 +222,39 @@ Each stage is a self-contained commit that leaves the firmware working.
   error frame via the existing `error_image::render` path, keep portal
   running.
 
+### Stage 5 — portal ergonomics
+
+Stage 3c ships the form as a raw byte string inlined into `src/portal.rs`,
+with all three fields empty and no scan-assisted SSID picker. Three
+follow-ups that each stand alone:
+
+1. **Extract the HTML into its own file** and load it via `include_str!`
+   (or `include_bytes!`). Living in `.rs` is fine for 30 lines but awkward
+   to edit (escaped quotes, no syntax highlighting in editors expecting
+   HTML). A companion file like `src/portal.html` kept under source
+   control keeps the markup readable and unlocks normal HTML tooling.
+
+2. **Pre-fill the form with whatever's currently in NVS** so "I only
+   want to change the URL" doesn't force the user to re-type their WiFi
+   password into their phone screen. The portal handler already has the
+   `Config<'static>` handle in hand (via the save signal flow); extending
+   it to also render the form with the stored values on `GET /` is a
+   template-substitution pass before the body is written. Omit the
+   password field's value on render (don't surface the stored password
+   via HTML) but show the SSID and URL.
+
+3. **Scan for nearby SSIDs** and render the SSID field as a dropdown
+   populated from the scan results, with a free-form text fallback for
+   hidden networks. This needs AP+STA concurrent mode on esp-radio —
+   which the wifi stack supports via `ModeConfig::ApSta`, but Stage 3
+   doesn't currently exercise — so expect some bring-up pain getting the
+   STA side to scan while the AP is serving the portal. Probably worth
+   gating behind a "Scan networks" button so we only pay the scan cost
+   when the user explicitly asks.
+
+None of these are blocking for day-to-day use; they're polish for when
+the core flow is considered stable.
+
 ## Open research items
 
 Before Stage 3, confirm:
