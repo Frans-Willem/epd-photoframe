@@ -229,8 +229,60 @@ struct WifiCredentials {
 /// ending in a software reset. For now it just blocks forever so the device
 /// stays visibly "in config mode" (LED blinking, nothing else happening)
 /// until the user power-cycles.
-async fn main_config(_ctx: HardwareCtx) -> ! {
-    println!("[STAGE 2 STUB] Entering configuration mode; blocking.");
+async fn main_config(ctx: HardwareCtx) -> ! {
+    let HardwareCtx {
+        mut spi_bus,
+        mut epd,
+        mut tft_enable,
+        ..
+    } = ctx;
+    let (panel_width, panel_height) = panel::panel_size();
+
+    // Stage 3a: draw a placeholder QR code + instructions. Stage 3b will
+    // replace the payload with the real WiFi provisioning URI once the
+    // AP is up, and replace the text with the real SSID + portal URL.
+    let payload = "http://reterminal-setup.local/";
+    let instructions =
+        "reTerminal Setup\n\n\
+         Scan the QR code or\n\
+         connect to WiFi:\n\
+         reTerminal-setup\n\n\
+         Then open\n\
+         http://reterminal-setup.local/";
+    println!("Rendering config screen with QR: {}", payload);
+    let frame = reterminal_e100x::config_image::render(
+        panel_width,
+        panel_height,
+        payload,
+        instructions,
+    );
+
+    println!("Reset");
+    epd.reset(&mut embassy_time::Delay).await.unwrap();
+    println!("Wait until idle");
+    epd.wait_until_idle().await.unwrap();
+    println!("Init");
+    epd.init(&mut spi_bus).await.unwrap();
+    println!("Power on");
+    epd.power_on(&mut spi_bus).await.unwrap();
+    println!("Update frame (QR)");
+    let data = (0..(panel_width * panel_height)).map(|idx| {
+        let (x, y) = panel::output_index_to_image_xy(idx);
+        frame[y * panel_width + x]
+    });
+    epd.update_frame(&mut spi_bus, data).await.unwrap();
+    println!("Trigger refresh");
+    epd.display_frame_no_wait(&mut spi_bus).await.unwrap();
+    println!("Wait until idle (~20s refresh)");
+    epd.wait_until_idle().await.unwrap();
+    println!("Power off");
+    epd.power_off(&mut spi_bus).await.unwrap();
+
+    if let Some(ref mut tft) = tft_enable {
+        tft.set_low();
+    }
+
+    println!("[STAGE 3a] QR displayed; blocking in config mode.");
     loop {
         Timer::after(Duration::from_secs(3600)).await;
     }

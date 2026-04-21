@@ -65,6 +65,7 @@ reqwless = "0.13.0"
 minipng = "1.0.0"
 esp-storage = { version = "0.8.1", features = ["esp32s3"] }
 esp-nvs = { version = "0.4.0", features = ["esp32s3"] }
+qrcodegen-no-heap = "1.8.1"
 
 [profile.dev]
 # Rust debug is too slow.
