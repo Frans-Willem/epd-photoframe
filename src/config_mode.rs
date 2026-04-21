@@ -1,9 +1,10 @@
-//! Configuration mode: bring up a WiFi AP (open, SSID suffix derived from
-//! the AP MAC), run a DHCP server so joined phones actually get an IP,
-//! run a DNS hijack so captive-portal probes land on our own IP, and
-//! render a QR code + textual instructions on the panel. Stage 3c will
-//! layer an HTTP captive-portal form on top of the same AP and trigger a
-//! software reset on save.
+//! Configuration mode: bring up a WiFi AP (open, SSID suffix derived
+//! from the AP MAC), run a DHCP server so joined phones actually get
+//! an IP, run a DNS hijack so captive-portal probes land on our own
+//! IP, serve an HTTP form from `portal.rs` for the user to submit
+//! WiFi credentials and image URL, and render a QR code + textual
+//! instructions on the panel. On form submission, persist the values
+//! to NVS and trigger a software reset back into the normal flow.
 
 use alloc::format;
 
@@ -14,25 +15,13 @@ use esp_println::println;
 use crate::config::Config;
 use crate::config_image;
 use crate::hardware::HardwareCtx;
+use crate::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
 use crate::portal;
 
 #[cfg(feature = "e1002")]
 use crate::gdep073e01 as panel;
 #[cfg(feature = "e1004")]
 use crate::t133a01 as panel;
-
-/// Per-mode static resources — kept local to this module so the normal
-/// flow can have its own without cross-referencing. Only one of the two
-/// modes runs per boot, so duplicating them in `.bss` is cheap.
-// Socket budget: 1 DHCP + 1 DNS + up to `web_task`'s handler-task pool
-// (4) of live HTTP connections, plus slack so probe bursts don't panic.
-// Each slot is small (smoltcp socket metadata only — the TCP rx/tx rings
-// live in the separate `TcpBuffers` pool), so 10 costs us on the order
-// of ~1 KB extra RAM.
-static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<10>> =
-    static_cell::ConstStaticCell::new(embassy_net::StackResources::new());
-static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
-    static_cell::StaticCell::new();
 
 pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     let HardwareCtx {

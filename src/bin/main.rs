@@ -366,11 +366,7 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     }
 }
 
-static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<4>> =
-    static_cell::ConstStaticCell::new(embassy_net::StackResources::new());
-
-static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
-    static_cell::StaticCell::new();
+use reterminal_e100x::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
 
 use embedded_io_async::BufRead;
 
