@@ -52,6 +52,25 @@ binary via `env!`. They should be user-configurable at runtime, most
 likely via a WiFi access-point captive portal (see the Previous+Next
 10-second-hold placeholder in `main.rs`).
 
+## Unify config-mode networking on the `edge-net` stack
+
+Config mode currently mixes three unrelated networking crates:
+`leasehund` for DHCP, `picoserve` for HTTP, `edge-captive` (part of the
+`edge-net` family) for DNS. The `edge-net` family ships its own DHCP
+server (`edge-dhcp`) and HTTP server (`edge-http`), all built on the
+same `edge-nal` abstraction, so swapping `leasehund` → `edge-dhcp` and
+`picoserve` → `edge-http` would let us drop the raw embassy-net UDP
+usage in favour of a single `edge_nal_embassy::Udp` / `Tcp` for all
+three services. Pros: fewer unrelated deps, consistent error types,
+fewer buffer pools to size. Cons: `edge-http` is less ergonomic than
+`picoserve`'s router / extractors (more manual request parsing), and
+we'd still carry the `picoserve` vs `edge-http` tradeoff for future
+features like JSON endpoints.
+
+Worth a concrete prototype once Stage 3c is stable — if the edge-net
+form handler is small enough, the dep simplification is probably
+worth the ergonomics hit.
+
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 
 The `esp-hal` / `esp-rtos` / `esp-radio` / `esp-alloc` / embassy stack is

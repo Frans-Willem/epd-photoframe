@@ -30,7 +30,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use reterminal_e100x::config::Config;
+use reterminal_e100x::config_mode;
 use reterminal_e100x::error_image;
+use reterminal_e100x::hardware::{HardwareCtx, WakeAction, WifiCredentials};
 use reterminal_e100x::spectra6::Spectra6Color;
 
 #[cfg(feature = "e1002")]
@@ -73,39 +75,6 @@ fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
         })
         .map(|absdiff| (absdiff as u32) * (absdiff as u32))
         .sum()
-}
-
-/// What the user (or the wake timer) wants us to do this cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WakeAction {
-    /// Fresh power-on / cold reset. Show the white pre-flash, fetch with no action query.
-    FreshBoot,
-    /// Woken by the 10-minute timer. No pre-flash, fetch with no action query.
-    Timer,
-    /// Woken by the Refresh button (or by a GPIO wake where no button is still held).
-    Refresh,
-    Previous,
-    Next,
-}
-
-impl WakeAction {
-    /// Query-string fragment to append to the base URL, e.g. `"?action=refresh"`.
-    /// `None` means fetch the base URL unchanged.
-    fn query(self) -> Option<&'static str> {
-        match self {
-            WakeAction::Refresh => Some("?action=refresh"),
-            WakeAction::Previous => Some("?action=previous"),
-            WakeAction::Next => Some("?action=next"),
-            WakeAction::FreshBoot | WakeAction::Timer => None,
-        }
-    }
-
-    /// Whether to trigger a non-blocking white pre-flash as immediate visual
-    /// feedback that the press was seen. The 10-minute timer wake runs in the
-    /// background, so no feedback is needed there.
-    fn show_white_flash(self) -> bool {
-        !matches!(self, WakeAction::Timer)
-    }
 }
 
 /// Read the RTC-IO interrupt status register (the wake latch) masked to the
@@ -163,175 +132,6 @@ fn determine_wake_action(
             );
             WakeAction::FreshBoot
         }
-    }
-}
-
-/// Fully-specialised type of the built panel driver. Both variants expose
-/// the same method API (`reset` / `init` / `power_on` / `update_frame` /
-/// `display_frame_no_wait` / `wait_until_idle` / `power_off`), so the rest
-/// of the firmware can use `EpdPanel` without cfg gates.
-#[cfg(feature = "e1002")]
-type EpdPanel = Gdep073e01<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>,
-    Input<'static>,
-    Output<'static>,
-    Output<'static>,
-    embassy_time::Delay,
->;
-#[cfg(feature = "e1004")]
-type EpdPanel = T133A01<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>, // cs_master
-    Output<'static>, // cs_slave
-    Input<'static>,
-    Output<'static>, // dc
-    Output<'static>, // rst
-    embassy_time::Delay,
->;
-
-/// Everything both `main_config` and `main_normal` need. The panel driver
-/// is pre-built (aliased as `EpdPanel` above) so the rest of the firmware
-/// doesn't need cfg gates for pin counts or panel-model-specific types.
-struct HardwareCtx {
-    spawner: Spawner,
-    rtc: esp_hal::rtc_cntl::Rtc<'static>,
-    wake_action: WakeAction,
-    wifi: esp_hal::peripherals::WIFI<'static>,
-
-    // Button pins; held here so we can hand them to `RtcioWakeupSource`
-    // at the end of the normal flow as deep-sleep wake sources.
-    gpio_btn_refresh: esp_hal::gpio::AnyPin<'static>,
-    gpio_btn_previous: esp_hal::gpio::AnyPin<'static>,
-    gpio_btn_next: esp_hal::gpio::AnyPin<'static>,
-
-    // Pre-built SPI bus (SCK/MOSI, plus MISO on E1004) and pre-built EPD
-    // driver holding its CS/BUSY/DC/RST pins.
-    spi_bus: Spi<'static, esp_hal::Async>,
-    epd: EpdPanel,
-
-    // E1004 drives a TFT-enable rail that must be high while the panel is
-    // powered. Already configured high for devices that have it; `None`
-    // for devices that don't.
-    tft_enable: Option<Output<'static>>,
-}
-
-/// Credentials + URL for the normal flow. Deliberately split out of
-/// `HardwareCtx` because `main_config` doesn't need them.
-struct WifiCredentials {
-    ssid: String,
-    password: String,
-    base_url: String,
-}
-
-/// Configuration-mode body: bring up a WiFi AP + DHCP server, render a QR
-/// code + textual instructions on the panel, then block. Stage 3c will
-/// layer DNS hijack + an HTTP captive-portal form on top of the same AP
-/// and trigger a software reset on save.
-async fn main_config(ctx: HardwareCtx) -> ! {
-    let HardwareCtx {
-        spawner,
-        wifi,
-        mut spi_bus,
-        mut epd,
-        mut tft_enable,
-        ..
-    } = ctx;
-    let (panel_width, panel_height) = panel::panel_size();
-
-    // --- Bring up WiFi in AP mode. The AP MAC is stable per-device, so we
-    // derive a user-recognisable SSID suffix from its last two bytes. ---
-    let radio_init = RADIO_CONTROLLER
-        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(radio_init, wifi, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-    let ap_device = interfaces.ap;
-
-    let ap_mac = esp_radio::wifi::ap_mac();
-    let ap_ssid = format!("reTerminal-setup-{:02X}{:02X}", ap_mac[4], ap_mac[5]);
-    println!("AP SSID: {}", ap_ssid);
-
-    let ap_mode_config = esp_radio::wifi::ModeConfig::AccessPoint(
-        esp_radio::wifi::AccessPointConfig::default()
-            .with_ssid(ap_ssid.clone())
-            .with_auth_method(esp_radio::wifi::AuthMethod::None),
-    );
-    wifi_controller.set_config(&ap_mode_config).unwrap();
-
-    // --- Static embassy-net stack on the AP interface. 192.168.4.1/24 is
-    // the ESP-IDF softap convention; keeping it here means the portal URL
-    // is predictable for users who miss the QR scan. ---
-    let ap_addr = core::net::Ipv4Addr::new(192, 168, 4, 1);
-    let mut dns_servers = heapless::Vec::new();
-    let _ = dns_servers.push(ap_addr);
-    let static_config = embassy_net::StaticConfigV4 {
-        address: embassy_net::Ipv4Cidr::new(ap_addr, 24),
-        gateway: Some(ap_addr),
-        dns_servers,
-    };
-    let net_config = embassy_net::Config::ipv4_static(static_config);
-
-    let rng = esp_hal::rng::Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-    let (net_stack, net_runner) =
-        embassy_net::new(ap_device, net_config, NETWORK_RESOURCES.take(), seed);
-
-    spawner.spawn(ap_wifi_task(wifi_controller)).unwrap();
-    spawner.spawn(net_task(net_runner)).unwrap();
-    spawner.spawn(dhcp_server_task(net_stack)).unwrap();
-
-    // --- Panel content: QR + instructions. The QR encodes a WiFi-join URI
-    // so most phones' camera-app scanners offer a one-tap "Join network"
-    // action; the text below it gives the SSID (for manual entry) and the
-    // portal URL (for users whose phones don't surface the captive-portal
-    // popup yet — Stage 3c). ---
-    let payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
-    let instructions = format!(
-        "reTerminal Setup\n\n\
-         Scan the QR code, or\n\
-         join WiFi:\n\
-         {}\n\n\
-         Then open:\n\
-         http://192.168.4.1/",
-        ap_ssid
-    );
-    println!("Rendering config screen with QR: {}", payload);
-    let frame = reterminal_e100x::config_image::render(
-        panel_width,
-        panel_height,
-        &payload,
-        &instructions,
-    );
-
-    println!("Reset");
-    epd.reset(&mut embassy_time::Delay).await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
-    println!("Init");
-    epd.init(&mut spi_bus).await.unwrap();
-    println!("Power on");
-    epd.power_on(&mut spi_bus).await.unwrap();
-    println!("Update frame (QR)");
-    let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = panel::output_index_to_image_xy(idx);
-        frame[y * panel_width + x]
-    });
-    epd.update_frame(&mut spi_bus, data).await.unwrap();
-    println!("Trigger refresh");
-    epd.display_frame_no_wait(&mut spi_bus).await.unwrap();
-    println!("Wait until idle (~20s refresh)");
-    epd.wait_until_idle().await.unwrap();
-    println!("Power off");
-    epd.power_off(&mut spi_bus).await.unwrap();
-
-    if let Some(ref mut tft) = tft_enable {
-        tft.set_low();
-    }
-
-    println!("[STAGE 3b] AP + DHCP up; QR displayed; blocking in config mode.");
-    loop {
-        Timer::after(Duration::from_secs(3600)).await;
     }
 }
 
@@ -493,41 +293,6 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
             }
         }
     }
-}
-
-/// Start the WiFi controller in AP mode and keep it alive. `start_async`
-/// internally waits for `WifiEvent::ApStart`, so by the time it returns
-/// the AP is advertising and accepting associations. The controller must
-/// not be dropped while we want the AP to stay up, hence the idle loop.
-#[embassy_executor::task]
-async fn ap_wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
-    println!("Starting WiFi in AP mode");
-    controller.start_async().await.unwrap();
-    println!("AP started");
-    loop {
-        // Log association events as they come in; they're useful for
-        // verifying a phone actually joined the portal network.
-        controller
-            .wait_for_event(esp_radio::wifi::WifiEvent::ApStaConnected)
-            .await;
-        println!("AP: station connected");
-    }
-}
-
-/// Serve DHCP on the AP interface so phones joining the captive-portal
-/// network get an IP address immediately (otherwise modern phones time out
-/// the join and drop the network as "no internet"). `run` loops forever.
-#[embassy_executor::task]
-async fn dhcp_server_task(stack: embassy_net::Stack<'static>) {
-    let mut server = leasehund::DhcpServer::<8, 1>::new_with_dns(
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // server IP
-        core::net::Ipv4Addr::new(255, 255, 255, 0), // subnet mask
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // gateway
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // DNS (self; hijack lands in Stage 3c)
-        core::net::Ipv4Addr::new(192, 168, 4, 100), // pool start
-        core::net::Ipv4Addr::new(192, 168, 4, 200), // pool end
-    );
-    server.run(stack).await
 }
 
 static NETWORK_RESOURCES: static_cell::ConstStaticCell<embassy_net::StackResources<4>> =
@@ -913,6 +678,6 @@ async fn main(spawner: Spawner) -> ! {
     {
         main_normal(hw, creds).await
     } else {
-        main_config(hw).await
+        config_mode::run(hw).await
     }
 }
