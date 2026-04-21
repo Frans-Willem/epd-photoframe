@@ -19,7 +19,7 @@ const K_WIFI_PASS: Key = Key::from_str("wifi.pass");
 const K_IMAGE_URL: Key = Key::from_str("image.url");
 
 /// Owns the flash peripheral and the parsed NVS state for the lifetime of
-/// the caller. Construct once at boot; re-use for reads and (later) writes.
+/// the caller. Construct once at boot; re-use for reads and writes.
 pub struct Config<'d> {
     nvs: esp_nvs::Nvs<esp_storage::FlashStorage<'d>>,
 }

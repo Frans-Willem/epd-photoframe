@@ -81,8 +81,8 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // --- Panel content: QR + instructions. The QR encodes a WiFi-join URI
     // so most phones' camera-app scanners offer a one-tap "Join network"
     // action; the text below it gives the SSID (for manual entry) and the
-    // portal URL (for users whose phones don't surface the captive-portal
-    // popup yet — Stage 3c). ---
+    // portal URL as a fallback for users whose phones don't surface the
+    // captive-portal popup automatically. ---
     let payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
     let instructions = format!(
         "reTerminal Setup\n\n\

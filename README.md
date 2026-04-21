@@ -11,8 +11,8 @@ Stand-alone firmware that will:
 - On each wake-up all sensors (battery, temperature, humidity) should be read and reported (MQTT, HTTP POST, or as headers of the PNG GET).
 - Low power consumption (deep sleep) between wake-ups.
 - Buttons should allow forcing a wake-up and refresh (green) or changing between pages (e.g. different URLs).
-- WiFi settings and URLs should be configurable through an Access Point captive portal.
-- Captive portal should be entered on first boot and when the refresh button is held for 30 sec.
+- WiFi settings and URLs are configurable through an Access Point captive portal.
+- Captive portal is entered automatically on a freshly-flashed device (whenever any required NVS key is missing) and can also be re-entered at any boot by holding Previous+Next for 10 s.
 
 Originally the full-colour PNG was going to be dithered on the device, but the
 larger E1004 panel (1200×1600) didn't leave enough memory for that approach,
@@ -40,9 +40,10 @@ feature so changes surface compile errors in both.
 
 Progress
 --------
-Firmware runs on the E1002 and E1004 with hard-coded WiFi/URL, refreshes every
-10 minutes and on button press, and reads a palette-based PNG from the
-configured URL.
+Firmware runs on the E1002 and E1004. WiFi credentials and image URL are
+provisioned at runtime through the captive-portal web UI and persisted to
+ESP-IDF NVS. The device refreshes every 10 minutes and on button press,
+fetching a palette-based PNG from the configured URL.
 
 References
 ----------

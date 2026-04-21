@@ -191,10 +191,11 @@ async fn wait_for_network_ready(
     }
 }
 
-/// The normal refresh flow: bring the panel up, optionally flash white for
-/// immediate feedback, connect to WiFi, fetch + decode the image, trigger
-/// the real refresh, then deep-sleep waking on either the 10-minute timer
-/// or a button press.
+/// The normal refresh flow: connect to WiFi with the stored credentials,
+/// fetch + decode the image (or an error frame on failure), trigger the
+/// real panel refresh on top of the background white pre-flash that
+/// `main()` already kicked off, then deep-sleep waking on either the
+/// 10-minute timer or a button press.
 async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let HardwareCtx {
         spawner,
