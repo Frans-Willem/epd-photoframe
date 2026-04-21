@@ -1,5 +1,18 @@
 # TODO
 
+## WiFi connection failure is invisible
+
+If the configured SSID / password is wrong, `wifi_task` loops on
+`connect_async()` forever (retrying every 5 s) and `main()` blocks on
+`net_stack.wait_link_up().await`, so the device is stuck with no output on
+the panel — same visible state as "still booting" from the user's
+perspective. Should be caught and surfaced: wrap the wait in a timeout
+(say 30 s from first attempt), and on timeout render an error frame via
+`error_image::render` explaining that WiFi connection failed, then go to
+deep sleep (so we retry on the next wake rather than burning battery in
+the retry loop). Once runtime WiFi configuration lands, this error frame
+should also hint at entering config mode (hold Previous+Next for 30 s).
+
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so

@@ -29,6 +29,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use reterminal_e100x::config::Config;
 use reterminal_e100x::error_image;
 use reterminal_e100x::spectra6::Spectra6Color;
 
@@ -413,6 +414,48 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
 
+    // Load runtime configuration from NVS. Any missing value falls back to
+    // the compile-time `env!()` default so dev builds keep working before
+    // the captive-portal provisioning flow lands; these fallbacks go away
+    // at the end of Stage 3 (see PLAN.md).
+    let mut config = match Config::new(peripherals.FLASH) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            println!(
+                "NVS init failed ({:?}); falling back to compile-time defaults",
+                e
+            );
+            None
+        }
+    };
+    let wifi_ssid = config
+        .as_mut()
+        .and_then(|c| c.wifi_ssid().ok().flatten())
+        .unwrap_or_else(|| {
+            println!("wifi.ssid: not in NVS, using compile-time default");
+            String::from(env!("WIFI_SSID"))
+        });
+    let wifi_password = config
+        .as_mut()
+        .and_then(|c| c.wifi_password().ok().flatten())
+        .unwrap_or_else(|| {
+            println!("wifi.pass: not in NVS, using compile-time default");
+            String::from(env!("WIFI_PASSWORD"))
+        });
+    let base_url = config
+        .as_mut()
+        .and_then(|c| c.image_url().ok().flatten())
+        .unwrap_or_else(|| {
+            println!("image.url: not in NVS, using compile-time default");
+            String::from(env!("WIFI_URL"))
+        });
+    println!(
+        "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?}",
+        wifi_ssid,
+        wifi_password.len(),
+        base_url
+    );
+
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
@@ -515,16 +558,13 @@ async fn main(spawner: Spawner) -> ! {
         esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
             .expect("Failed to initialize Wi-Fi controller");
 
-    const SSID: &str = env!("WIFI_SSID");
-    const PASSWORD: &str = env!("WIFI_PASSWORD");
-
     let wifi_sta_device = interfaces.sta;
     let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
     let station_config = esp_radio::wifi::ModeConfig::Client(
         esp_radio::wifi::ClientConfig::default()
-            .with_ssid(SSID.into())
-            .with_password(PASSWORD.into()),
+            .with_ssid(wifi_ssid.as_str().into())
+            .with_password(wifi_password.as_str().into()),
     );
     wifi_controller.set_config(&station_config).unwrap();
 
@@ -545,8 +585,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // Build the request URL with the appropriate action query param.
     let url: String = match wake_action.query() {
-        Some(q) => format!("{}{}", env!("WIFI_URL"), q),
-        None => String::from(env!("WIFI_URL")),
+        Some(q) => format!("{}{}", base_url, q),
+        None => base_url.clone(),
     };
     println!("Fetching {}", url);
 
