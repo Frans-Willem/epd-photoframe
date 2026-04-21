@@ -11,13 +11,15 @@ use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 
-use esp_hal::gpio::{Input, InputConfig, InputPin, Pull};
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_println::println;
 
 use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::Config as SpiConfig;
 use esp_hal::spi::master::Spi;
+
+use esp_hal::system::SleepSource;
 
 use esp_backtrace as _;
 
@@ -72,66 +74,62 @@ fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
         .sum()
 }
 
-struct Button<'t> {
-    input: Input<'t>,
-    inverted: bool,
+/// What the user (or the wake timer) wants us to do this cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WakeAction {
+    /// Fresh power-on / cold reset. Show the white pre-flash, fetch with no action query.
+    FreshBoot,
+    /// Woken by the 10-minute timer. No pre-flash, fetch with no action query.
+    Timer,
+    /// Woken by the Refresh button (or by a GPIO wake where no button is still held).
+    Refresh,
+    Previous,
+    Next,
 }
 
-impl<'t> Button<'t> {
-    pub fn new(pin: impl InputPin + 't, config: InputConfig, inverted: bool) -> Self {
-        Button {
-            input: Input::new(pin, config),
-            inverted,
-        }
-    }
-    pub fn is_pressed(&self) -> bool {
-        if self.inverted {
-            self.input.is_low()
-        } else {
-            self.input.is_high()
+impl WakeAction {
+    /// Query-string fragment to append to the base URL, e.g. `"?action=refresh"`.
+    /// `None` means fetch the base URL unchanged.
+    fn query(self) -> Option<&'static str> {
+        match self {
+            WakeAction::Refresh => Some("?action=refresh"),
+            WakeAction::Previous => Some("?action=previous"),
+            WakeAction::Next => Some("?action=next"),
+            WakeAction::FreshBoot | WakeAction::Timer => None,
         }
     }
 
-    pub fn is_released(&self) -> bool {
-        !self.is_pressed()
-    }
-
-    pub async fn wait_for(&mut self, pressed: bool) {
-        if self.inverted ^ pressed {
-            self.input.wait_for_high().await
-        } else {
-            self.input.wait_for_low().await
-        }
-    }
-
-    pub async fn wait_for_pressed(&mut self) {
-        self.wait_for(true).await
-    }
-
-    pub async fn wait_for_released(&mut self) {
-        self.wait_for(false).await
+    /// Whether to trigger a non-blocking white pre-flash as immediate visual
+    /// feedback that the press was seen. The 10-minute timer wake runs in the
+    /// background, so no feedback is needed there.
+    fn show_white_flash(self) -> bool {
+        !matches!(self, WakeAction::Timer)
     }
 }
 
-#[embassy_executor::task(pool_size = 3)]
-async fn button_task(mut button: Button<'static>, button_name: &'static str) {
-    loop {
-        loop {
-            button.wait_for_pressed().await;
-            Timer::after(Duration::from_millis(10)).await; // debounce
-            if button.is_pressed() {
-                break;
+fn determine_wake_action(
+    wake_reason: SleepSource,
+    refresh_held: bool,
+    previous_held: bool,
+    next_held: bool,
+) -> WakeAction {
+    match wake_reason {
+        SleepSource::Undefined => WakeAction::FreshBoot,
+        SleepSource::Timer => WakeAction::Timer,
+        // Ext1 (RtcioWakeupSource) and anything else non-timer: treat as a
+        // button wake. If a button is still held we trust it; otherwise fall
+        // back to Refresh (the user may have released before we could read).
+        _ => {
+            if refresh_held {
+                WakeAction::Refresh
+            } else if next_held {
+                WakeAction::Next
+            } else if previous_held {
+                WakeAction::Previous
+            } else {
+                WakeAction::Refresh
             }
         }
-        println!("Button {0} pressed!", button_name);
-        loop {
-            button.wait_for_released().await;
-            Timer::after(Duration::from_millis(10)).await; // debounce
-            if button.is_released() {
-                break;
-            }
-        }
-        println!("Button {0} released!", button_name);
     }
 }
 
@@ -183,7 +181,7 @@ static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
 
 use embedded_io_async::BufRead;
 
-/// Fetch a pre-quantised palette PNG from `WIFI_URL`, decode it, and map its
+/// Fetch a pre-quantised palette PNG from `url`, decode it, and map its
 /// palette entries onto `Spectra6Color`, returning a row-major frame buffer
 /// sized to match the panel. On any HTTP / content-type / PNG / sizing
 /// failure, returns a human-readable error message; `text/plain` responses
@@ -191,6 +189,7 @@ use embedded_io_async::BufRead;
 /// error message.
 async fn try_build_frame<'t>(
     stack: embassy_net::Stack<'t>,
+    url: &str,
     panel_width: usize,
     panel_height: usize,
 ) -> Result<Vec<Spectra6Color>, String> {
@@ -200,9 +199,8 @@ async fn try_build_frame<'t>(
 
     println!("Attempting to do HTTP request");
     let mut http_client = reqwless::client::HttpClient::new(&tcp, &dns);
-    const URL: &str = env!("WIFI_URL");
     let mut request = http_client
-        .request(reqwless::request::Method::GET, URL)
+        .request(reqwless::request::Method::GET, url)
         .await
         .map_err(|e| format!("HTTP request: {:?}", e))?;
 
@@ -312,19 +310,50 @@ async fn main(spawner: Spawner) -> ! {
     let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    let mut gpio_btn_reset = peripherals.GPIO3;
-    let btn_reset_state = esp_hal::gpio::Input::new(
-        gpio_btn_reset.reborrow(),
-        esp_hal::gpio::InputConfig::default().with_pull(Pull::Up),
+
+    // Read all three buttons ASAP so we capture the press even if the user
+    // releases quickly after powering the device out of deep sleep.
+    let mut gpio_k0 = peripherals.GPIO3;
+    let mut gpio_k1 = peripherals.GPIO4;
+    let mut gpio_k2 = peripherals.GPIO5;
+    let k0_held = Input::new(
+        gpio_k0.reborrow(),
+        InputConfig::default().with_pull(Pull::Up),
     )
     .is_low();
+    let k1_held = Input::new(
+        gpio_k1.reborrow(),
+        InputConfig::default().with_pull(Pull::Up),
+    )
+    .is_low();
+    let k2_held = Input::new(
+        gpio_k2.reborrow(),
+        InputConfig::default().with_pull(Pull::Up),
+    )
+    .is_low();
+
+    // Map raw GPIO states to semantic labels (silkscreen order differs per device).
+    #[cfg(feature = "e1002")]
+    let (refresh_held, previous_held, next_held) = (k0_held, k2_held, k1_held);
+    #[cfg(feature = "e1004")]
+    let (refresh_held, previous_held, next_held) = (k2_held, k1_held, k0_held);
+
+    let wake_action = determine_wake_action(wake_reason, refresh_held, previous_held, next_held);
+
     let mut rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
-
     let time_since_boot = rtc.time_since_boot();
-
     println!(
-        "Device booting up - {reset_reason:?} - {wake_reason:?} - {btn_reset_state:?} - {time_since_boot:?}"
+        "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
+         buttons[refresh={refresh_held} previous={previous_held} next={next_held}] \
+         uptime={time_since_boot:?}"
     );
+
+    // TODO: if wake_action is Previous or Next and both buttons are still held,
+    // wait up to 30 seconds; if they stay held for the whole window, enter a
+    // WiFi access-point configuration mode. Placeholder for now.
+    if previous_held && next_held {
+        println!("TODO: previous+next held at wake; AP config mode would engage after 30s.");
+    }
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
@@ -333,26 +362,6 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0);
 
     spawner
-        .spawn(button_task(
-            Button::new(
-                peripherals.GPIO4,
-                InputConfig::default().with_pull(Pull::Up),
-                true,
-            ),
-            "Right",
-        ))
-        .unwrap();
-    spawner
-        .spawn(button_task(
-            Button::new(
-                peripherals.GPIO5,
-                InputConfig::default().with_pull(Pull::Up),
-                true,
-            ),
-            "Left",
-        ))
-        .unwrap();
-    spawner
         .spawn(blink_task(Output::new(
             peripherals.GPIO6,
             Level::Low,
@@ -360,55 +369,9 @@ async fn main(spawner: Spawner) -> ! {
         )))
         .unwrap();
 
-    let radio_init = RADIO_CONTROLLER
-        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-
-    const SSID: &str = env!("WIFI_SSID");
-    const PASSWORD: &str = env!("WIFI_PASSWORD");
-
-    let wifi_sta_device = interfaces.sta;
-    let sta_config = embassy_net::Config::dhcpv4(Default::default());
-
-    let station_config = esp_radio::wifi::ModeConfig::Client(
-        esp_radio::wifi::ClientConfig::default()
-            .with_ssid(SSID.into())
-            .with_password(PASSWORD.into()),
-    );
-    wifi_controller.set_config(&station_config).unwrap();
-
-    let rng = esp_hal::rng::Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-
-    let (net_stack, net_runner) =
-        embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
-
-    spawner.spawn(wifi_task(wifi_controller)).unwrap();
-    spawner.spawn(net_task(net_runner)).unwrap();
-
-    println!("Waiting for network link...");
-    net_stack.wait_link_up().await;
-    println!("Link up, waiting for config up");
-    net_stack.wait_config_up().await;
-    println!("Network config up! {:?}", net_stack.config_v4());
-
-    let (panel_width, panel_height) = panel::panel_size();
-    let frame: Vec<Spectra6Color> = match try_build_frame(net_stack, panel_width, panel_height).await {
-        Ok(f) => f,
-        Err(msg) => {
-            println!("Falling back to error image: {}", msg);
-            error_image::render(panel_width, panel_height, &msg)
-        }
-    };
-
-    let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = panel::output_index_to_image_xy(idx);
-        frame[y * panel_width + x]
-    });
-
     // --- SPI bus and panel driver setup (device-specific) ---
+    let (panel_width, panel_height) = panel::panel_size();
+
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -466,6 +429,82 @@ async fn main(spawner: Spawner) -> ! {
         &mut embassy_time::Delay,
     );
 
+    // --- White pre-flash (non-blocking) for immediate user feedback. ---
+    if wake_action.show_white_flash() {
+        println!("White pre-flash");
+        println!("Reset");
+        epd.reset(&mut embassy_time::Delay).await.unwrap();
+        println!("Wait until idle");
+        epd.wait_until_idle().await.unwrap();
+        println!("Init");
+        epd.init(&mut epd_spi_bus).await.unwrap();
+        println!("Power on");
+        epd.power_on(&mut epd_spi_bus).await.unwrap();
+        println!("Update frame (white)");
+        epd.update_frame(
+            &mut epd_spi_bus,
+            (0..(panel_width * panel_height)).map(|_| Spectra6Color::White),
+        )
+        .await
+        .unwrap();
+        println!("Trigger refresh (no wait)");
+        epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
+        // Intentionally no wait_until_idle: the refresh continues while we do
+        // WiFi/HTTP work; the reset below will abort it before the real push.
+    }
+
+    // --- WiFi bring-up (runs in parallel with any ongoing white refresh). ---
+    let radio_init = RADIO_CONTROLLER
+        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
+    let (mut wifi_controller, interfaces) =
+        esp_radio::wifi::new(radio_init, peripherals.WIFI, Default::default())
+            .expect("Failed to initialize Wi-Fi controller");
+
+    const SSID: &str = env!("WIFI_SSID");
+    const PASSWORD: &str = env!("WIFI_PASSWORD");
+
+    let wifi_sta_device = interfaces.sta;
+    let sta_config = embassy_net::Config::dhcpv4(Default::default());
+
+    let station_config = esp_radio::wifi::ModeConfig::Client(
+        esp_radio::wifi::ClientConfig::default()
+            .with_ssid(SSID.into())
+            .with_password(PASSWORD.into()),
+    );
+    wifi_controller.set_config(&station_config).unwrap();
+
+    let rng = esp_hal::rng::Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+
+    let (net_stack, net_runner) =
+        embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
+
+    spawner.spawn(wifi_task(wifi_controller)).unwrap();
+    spawner.spawn(net_task(net_runner)).unwrap();
+
+    println!("Waiting for network link...");
+    net_stack.wait_link_up().await;
+    println!("Link up, waiting for config up");
+    net_stack.wait_config_up().await;
+    println!("Network config up! {:?}", net_stack.config_v4());
+
+    // Build the request URL with the appropriate action query param.
+    let url: String = match wake_action.query() {
+        Some(q) => format!("{}{}", env!("WIFI_URL"), q),
+        None => String::from(env!("WIFI_URL")),
+    };
+    println!("Fetching {}", url);
+
+    let frame: Vec<Spectra6Color> =
+        match try_build_frame(net_stack, &url, panel_width, panel_height).await {
+            Ok(f) => f,
+            Err(msg) => {
+                println!("Falling back to error image: {}", msg);
+                error_image::render(panel_width, panel_height, &msg)
+            }
+        };
+
+    // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
     println!("Wait until idle");
@@ -475,32 +514,15 @@ async fn main(spawner: Spawner) -> ! {
     println!("Power on");
     epd.power_on(&mut epd_spi_bus).await.unwrap();
     println!("Update frame");
+    let data = (0..(panel_width * panel_height)).map(|idx| {
+        let (x, y) = panel::output_index_to_image_xy(idx);
+        frame[y * panel_width + x]
+    });
     epd.update_frame(&mut epd_spi_bus, data).await.unwrap();
     println!("Trigger refresh");
     epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
     println!("Wait until idle (~20s refresh)");
     epd.wait_until_idle().await.unwrap();
-
-    // Quick hack to allow clearing the screen for storage: hold refresh button
-    // while the final refresh is in progress.
-    if esp_hal::gpio::Input::new(
-        gpio_btn_reset.reborrow(),
-        esp_hal::gpio::InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low()
-    {
-        println!("Clearing screen before power off");
-        epd.update_frame(
-            &mut epd_spi_bus,
-            (0..(panel_width * panel_height)).map(|_| Spectra6Color::Clean),
-        )
-        .await
-        .unwrap();
-        println!("Trigger refresh (clear)");
-        epd.display_frame_no_wait(&mut epd_spi_bus).await.unwrap();
-        println!("Wait until idle (~20s refresh)");
-        epd.wait_until_idle().await.unwrap();
-    }
 
     println!("Power off");
     epd.power_off(&mut epd_spi_bus).await.unwrap();
@@ -517,10 +539,11 @@ async fn main(spawner: Spawner) -> ! {
     let wakeup_pins: &mut [(
         &mut dyn esp_hal::gpio::RtcPin,
         esp_hal::rtc_cntl::sleep::WakeupLevel,
-    )] = &mut [(
-        &mut gpio_btn_reset,
-        esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
-    )];
+    )] = &mut [
+        (&mut gpio_k0, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_k1, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (&mut gpio_k2, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+    ];
     let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
 
     let timer_wake_source =
