@@ -77,6 +77,25 @@ fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
         .sum()
 }
 
+/// Block until the UART0 TX path has fully clocked out everything
+/// esp-println handed it. Polls the FIFO byte count down to zero, waits
+/// 10 µs for the FSM to transition to idle (the esp-hal driver does the
+/// same fixup — the FSM can briefly stay busy after the last byte leaves
+/// the FIFO), then polls the "transmit FSM is idle" status bit. Mirrors
+/// `esp_hal::uart::UartTx::flush` but operates on the PAC directly so
+/// we don't need to steal UART0 from esp-println.
+///
+/// Used right before `rtc.sleep_deep(..)`: `sleep_deep` cuts the UART
+/// peripheral clock, so any bytes still in the shift register when we
+/// arrive there are truncated on the wire. esp-println's ROM TX_FLUSH
+/// drains the software FIFO but *not* the hardware shift register.
+fn wait_for_uart_tx_idle() {
+    let uart0 = esp_hal::peripherals::UART0::regs();
+    while uart0.status().read().txfifo_cnt().bits() > 0 {}
+    esp_hal::delay::Delay::new().delay_micros(10);
+    while uart0.fsm_status().read().st_utx_out().bits() != 0 {}
+}
+
 /// Read the RTC-IO interrupt status register (the wake latch) masked to the
 /// caller's bits of interest, clear those same bits via the register's
 /// write-1-to-clear sibling, and return the pre-clear masked value. Other
@@ -355,6 +374,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         &[&timer_wake_source, &pin_wake_source];
 
     println!("Going to deep sleep :)");
+    wait_for_uart_tx_idle();
     rtc.sleep_deep(wake_sources);
 }
 

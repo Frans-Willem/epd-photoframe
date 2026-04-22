@@ -180,21 +180,6 @@ feedback the moment `entering_config_mode` resolves true:
 Pick whichever the hardware actually supports with minimal extra
 wiring.
 
-## Flush `println!` output before deep sleep / software reset
-
-`esp_println::println!` writes to UART, but we never check that the
-final log lines are fully clocked out before `rtc.sleep_deep` or
-`esp_hal::system::software_reset()`. In practice the last message
-before reboot ("Going to deep sleep :)", "Rebooting", etc.) often
-appears truncated in the serial monitor, which is exactly the window
-where a diagnostic is most useful.
-
-Research whether the esp-hal UART has a drain / wait-for-idle API we
-can await before pulling the trigger, or whether a short
-`embassy_time::Timer::after` (~10 ms at the current baud) is a
-reliable enough proxy. Apply the same to the normal-flow
-`sleep_deep` and the config-mode `software_reset` paths.
-
 ## Scan for nearby WiFi networks in the portal
 
 The portal's SSID field is free-form text today. A dropdown populated
@@ -220,6 +205,25 @@ advertised URL, set it via the portal, and check that
 `embassy_net::dns::DnsSocket::query` returns an address. If it
 doesn't, figure out whether we need an additional feature /
 `embassy-net-mdns` crate or an explicit multicast subscription.
+
+## Clean up the UART-flush helper
+
+`wait_for_uart_tx_idle` in `main.rs` mirrors
+`esp_hal::uart::UartTx::flush` by polling the UART0 PAC directly —
+it works, but the raw `esp_hal::peripherals::UART0::regs()` reads
+feel out of place in otherwise peripherals-owned-via-`esp_hal::init`
+application code. Ideally we'd grab `peripherals.UART0` in `main()`,
+wrap it in a real `UartTx`, thread it through `HardwareCtx`, and
+call its `flush()` before `sleep_deep`.
+
+The only snag is that `esp-println` writes to UART0 via ROM
+functions rather than taking the peripheral through the PAC, so
+both "owners" share the hardware — in practice they cooperate
+because the ROM functions just poke registers, but the
+peripherals-ownership story would get a bit hand-wavy. Worth
+looking at what `esp_hal::uart::UartTx::new` actually does to see
+whether splitting the registers / using the existing `Uart` type
+alongside esp-println is explicitly supported.
 
 ## Re-audit direct dependencies
 
