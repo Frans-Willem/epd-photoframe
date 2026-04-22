@@ -1,7 +1,7 @@
 [package]
 edition      = "2024"
 name         = "reterminal_e100x"
-rust-version = "1.88"
+rust-version = "1.91"
 version      = "0.1.0"
 
 [[bin]]

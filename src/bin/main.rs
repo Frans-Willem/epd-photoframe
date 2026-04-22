@@ -141,6 +141,17 @@ fn determine_wake_action(
 /// auth error from `connect_async`.
 const WIFI_LINK_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fallback deep-sleep duration on a successful fetch when the server
+/// doesn't send a `Refresh` header. E-ink is fine with hours-scale
+/// refreshes and most dashboard content doesn't change faster than
+/// that; the server can override on a per-response basis.
+const DEFAULT_SUCCESS_SLEEP: core::time::Duration = core::time::Duration::from_hours(4);
+
+/// Deep-sleep duration on the error path. Shorter than success so a
+/// transient failure (WiFi glitch, server hiccup) recovers on the next
+/// wake without the user having to push a button.
+const DEFAULT_ERROR_SLEEP: core::time::Duration = core::time::Duration::from_mins(10);
+
 enum NetworkError {
     ConnectFailed(esp_radio::wifi::WifiError),
     Timeout(Duration),
@@ -242,7 +253,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     //  2) fetch + decode the image.
     // Any `Err` short-circuits to `error_image::render`, which then goes
     // through the same panel-refresh path as a successful frame.
-    let frame_result: Result<Vec<Spectra6Color>, String> = async {
+    let fetch_result: Result<FetchOutcome, String> = async {
         wait_for_network_ready(net_stack, WIFI_LINK_TIMEOUT)
             .await
             .map_err(|e| e.message(&creds.ssid))?;
@@ -260,10 +271,32 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     }
     .await;
 
-    let frame: Vec<Spectra6Color> = frame_result.unwrap_or_else(|msg| {
-        println!("Falling back to error image: {}", msg);
-        error_image::render(panel_width, panel_height, &msg)
-    });
+    // Success ⇒ use the server's `Refresh` hint if it sent one, else
+    // the long-form default. Error ⇒ short retry default so a
+    // transient issue gets another shot without the user pressing
+    // anything.
+    let (frame, sleep_duration) = match fetch_result {
+        Ok(FetchOutcome { frame, refresh }) => {
+            if let Some(hint) = &refresh {
+                println!(
+                    "Server Refresh hint: interval={:?} url_override={:?}",
+                    hint.interval, hint.url_override
+                );
+                // url_override not yet persisted — see TODO.
+            }
+            let sleep = refresh
+                .map(|h| h.interval)
+                .unwrap_or(DEFAULT_SUCCESS_SLEEP);
+            (frame, sleep)
+        }
+        Err(msg) => {
+            println!("Falling back to error image: {}", msg);
+            (
+                error_image::render(panel_width, panel_height, &msg),
+                DEFAULT_ERROR_SLEEP,
+            )
+        }
+    };
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     println!("Reset");
@@ -316,8 +349,8 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     ];
     let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
 
-    let timer_wake_source =
-        esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(core::time::Duration::from_secs(10 * 60));
+    println!("Deep sleep for {:?}", sleep_duration);
+    let timer_wake_source = esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(sleep_duration);
     let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] =
         &[&timer_wake_source, &pin_wake_source];
 
@@ -407,6 +440,53 @@ fn parse_http_url(url: &str) -> Result<(&str, u16, &str), String> {
     Ok((host, port, path))
 }
 
+/// Optional server hint parsed from the `Refresh:` response header —
+/// carries how long the firmware should wait before the next fetch,
+/// and optionally a one-shot URL override for that next fetch.
+#[derive(Debug, Clone)]
+struct RefreshHint {
+    interval: core::time::Duration,
+    /// Not yet consumed — RTC-retained memory for the override URL is
+    /// still a TODO. Parsed eagerly so the logging surfaces it.
+    url_override: Option<String>,
+}
+
+/// What `try_build_frame` returns on success: the decoded panel frame
+/// plus any server-side hint for the next refresh cycle.
+struct FetchOutcome {
+    frame: Vec<Spectra6Color>,
+    refresh: Option<RefreshHint>,
+}
+
+/// Parse a `Refresh: <secs>[; url=<url>]` header value. Returns `None`
+/// for anything that doesn't start with a non-negative integer.
+fn parse_refresh_header(value: &str) -> Option<RefreshHint> {
+    let value = value.trim();
+    let (secs_part, rest) = match value.split_once(';') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (value, None),
+    };
+    let interval_secs: u64 = secs_part.parse().ok()?;
+    let url_override = rest.and_then(|r| {
+        let (key, raw) = r.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("url") {
+            return None;
+        }
+        let v = raw.trim();
+        // Strip matching surrounding quotes if present.
+        let v = if let Some(inner) = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            inner
+        } else {
+            v
+        };
+        if v.is_empty() { None } else { Some(String::from(v)) }
+    });
+    Some(RefreshHint {
+        interval: core::time::Duration::from_secs(interval_secs),
+        url_override,
+    })
+}
+
 /// Fetch a pre-quantised palette PNG from `url`, decode it, and map its
 /// palette entries onto `Spectra6Color`, returning a row-major frame buffer
 /// sized to match the panel. On any HTTP / content-type / PNG / sizing
@@ -418,7 +498,7 @@ async fn try_build_frame<'t>(
     url: &str,
     panel_width: usize,
     panel_height: usize,
-) -> Result<Vec<Spectra6Color>, String> {
+) -> Result<FetchOutcome, String> {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let (host, port, path) = parse_http_url(url)?;
@@ -468,17 +548,23 @@ async fn try_build_frame<'t>(
         .await
         .map_err(|e| format!("HTTP send: {:?}", e))?;
 
-    // Snapshot the status + Content-Type before we release the header
-    // borrow and start reading the body. The full Content-Type (with any
-    // `; charset=...` parameters) is kept verbatim for error messages;
-    // we'll normalise to a base type for classification below.
-    let (status_code, content_type) = {
+    // Snapshot the status + Content-Type + any `Refresh:` hint before
+    // we release the header borrow and start reading the body. The
+    // full Content-Type (with any `; charset=...` parameters) is kept
+    // verbatim for error messages; we'll normalise to a base type for
+    // classification below.
+    let (status_code, content_type, refresh_hint) = {
         let headers = conn
             .headers()
             .map_err(|e| format!("HTTP headers: {:?}", e))?;
+        let refresh = headers
+            .headers
+            .get("Refresh")
+            .and_then(parse_refresh_header);
         (
             headers.code,
             headers.headers.content_type().map(String::from),
+            refresh,
         )
     };
 
@@ -635,7 +721,10 @@ async fn try_build_frame<'t>(
             frame.push(png_palette[palette_index as usize]);
         }
     }
-    Ok(frame)
+    Ok(FetchOutcome {
+        frame,
+        refresh: refresh_hint,
+    })
 }
 
 /// Extract the palette index for pixel `x` in a row packed at `bit_depth`

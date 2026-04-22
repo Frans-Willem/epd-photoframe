@@ -44,26 +44,20 @@ Likely shape:
 Keep the query-string-param backup in mind for servers / clients that
 strip custom headers.
 
-## Honour a `Refresh` header on the image response
+## `Refresh` header URL override needs RTC-retained memory
 
-The image server may return a `Refresh: <seconds>[; url=<new URL>]`
-header (same semantics as the HTML meta-refresh equivalent). Three
-follow-ups for the firmware:
+The `Refresh: <secs>[; url=<new URL>]` header is parsed and the
+interval is used for the next deep-sleep, but the `url` parameter is
+currently just logged and dropped. The user's intent: let the server
+hand out a one-shot override URL (e.g. "next refresh, serve this
+different page") that doesn't overwrite the configured base in NVS.
 
-1. **Use that interval for the next deep-sleep** instead of the
-   hard-coded 10 minutes, so the server can throttle / accelerate
-   updates server-side without a firmware change.
-2. **If a URL is supplied**, stash it in RTC-retained memory so the
-   next wake fetches *that* URL instead of `image.url` from NVS. The
-   user's intent: let the server hand out a one-shot override URL
-   (e.g. "next refresh, serve this different page") that doesn't
-   overwrite the configured base. Anything in RTC memory is lost on
-   power-off, which is the right TTL for a single-shot override.
-3. **Reconsider the default sleep duration** we fall back to when the
-   server doesn't send a `Refresh` header. 10 minutes is aggressive
-   for a successful image (e-paper is fine with hours-scale updates);
-   keep 10 minutes for the error-frame path (user will probably want
-   to retry soon), but stretch the happy path to something like 2-6 h.
+Needs RTC-retained memory — content that survives deep sleep but is
+lost on power-off, which is the right TTL for a single-shot override.
+Wire up an `#[link_section = ".rtc_noinit"]` static (or an equivalent
+esp-hal primitive) and, on wake, check it *before* reading `image.url`
+from NVS. Same scaffolding will be useful for the DHCP-lease cache
+(see separate TODO).
 
 ## Harmonise padding between the QR and instructions area
 
@@ -98,6 +92,23 @@ greedily packs words, falling back to mid-word breaks only for words
 that don't fit a line on their own. The wrapped string then feeds
 `embedded_graphics::Text::with_baseline` the same way today. Both
 call sites can share the wrapper since they both use `FONT_10X20`.
+
+## Persist DHCP lease in RTC memory
+
+Once the `Refresh`-header work has RTC-retained memory wired up for
+the one-shot URL override, it'd be cheap to also stash the current
+DHCP lease (IP, mask, gateway, DNS, lease TTL) there. On the next
+wake we'd skip the DHCP request entirely (`embassy_net::Config::
+ipv4_static` with the retained values) as long as the lease hasn't
+expired and the network is presumably the same. Saves a round-trip
+(~100-300 ms on a decent AP) per wake — noticeable over a day of
+timer-driven refreshes.
+
+Fall back to DHCP on: lease expired, retained values unreadable, or
+any failure on the first probe (e.g. gateway no longer responding).
+Sketch the fall-back as "try the static config, ping gateway, on
+failure tear down + redo with DHCP" — straightforward enough once
+the RTC-memory scaffolding exists.
 
 ## Button presses during refresh are ignored
 
