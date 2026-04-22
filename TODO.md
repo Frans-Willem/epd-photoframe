@@ -1,5 +1,29 @@
 # TODO
 
+## Static-IP + explicit WPA auth-type configuration
+
+The current NVS schema stores just the three fields the portal form
+surfaces: `wifi.ssid`, `wifi.pass`, `image.url`. Three more fields are
+reserved for future expansion — adding them when the user actually
+needs them is a portal-form extension plus a small config loader
+change, no schema migration.
+
+| Key         | Type | Purpose |
+|-------------|------|---------|
+| `wifi.auth` | str  | `"open"` or `"wpa2"`. If absent, auto-detect from whether `wifi.pass` is empty. |
+| `net.mode`  | str  | `"dhcp"` (default) or `"static"`. |
+| `net.addr`  | u32  | Big-endian IPv4 address. Only if `net.mode == "static"`. |
+| `net.mask`  | u8   | CIDR prefix length (e.g. 24). Only if static. |
+| `net.gw`    | u32  | IPv4 gateway. Only if static. |
+| `net.dns1`  | u32  | Optional DNS server. |
+| `net.dns2`  | u32  | Optional second DNS server. |
+
+`embassy_net` already supports both via `Config::dhcpv4(..)` and
+`Config::ipv4_static(StaticConfigV4 { address, gateway, dns_servers })`
+— the switch is just which variant we pass in. The ui change is a
+mode-selector (DHCP / static) on the portal form that conditionally
+shows the IP / mask / gateway / DNS fields.
+
 ## Honour a `Refresh` header on the image response
 
 The image server may return a `Refresh: <seconds>[; url=<new URL>]`
