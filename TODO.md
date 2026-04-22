@@ -1,16 +1,5 @@
 # TODO
 
-## PNG bit-depth handling
-
-`try_build_frame` currently assumes the PNG is **indexed 8 bpp** (256
-palette entries, one byte per pixel). The server is being extended to
-emit 1/2/4/8 bpp indexed PNGs, so the decoder-side pixel reading needs
-to branch on `image.bit_depth()` and unpack the row bytes accordingly.
-The palette-lookup logic stays the same — only the per-pixel byte →
-palette-index extraction changes. Worth also adding a guard so an
-unexpected bit depth or a non-indexed colour type surfaces as an
-error frame rather than corrupt pixels.
-
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so

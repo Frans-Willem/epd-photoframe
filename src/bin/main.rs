@@ -461,6 +461,19 @@ async fn try_build_frame<'t>(
             panel_height
         ));
     }
+    if image.color_type() != minipng::ColorType::Indexed {
+        return Err(format!(
+            "Unsupported PNG color type: {:?} (need Indexed)",
+            image.color_type()
+        ));
+    }
+    let bit_depth = match image.bit_depth() {
+        minipng::BitDepth::One => 1u8,
+        minipng::BitDepth::Two => 2,
+        minipng::BitDepth::Four => 4,
+        minipng::BitDepth::Eight => 8,
+        other => return Err(format!("Unsupported PNG bit depth: {:?}", other)),
+    };
 
     let png_palette: Vec<Spectra6Color> = (0..=255)
         .map(|index| image.palette(index))
@@ -476,18 +489,57 @@ async fn try_build_frame<'t>(
         })
         .collect();
 
+    // Validate the decoded pixel buffer is self-consistent before indexing
+    // into it — otherwise a short / truncated row from a corrupt PNG would
+    // panic inside the inner loop.
+    let bytes_per_row = image.bytes_per_row();
+    let pixels = image.pixels();
+    let min_bytes_per_row = (panel_width * bit_depth as usize).div_ceil(8);
+    if bytes_per_row < min_bytes_per_row {
+        return Err(format!(
+            "PNG row too short: {} bytes/row but need at least {} for {} {}-bpp pixels",
+            bytes_per_row, min_bytes_per_row, panel_width, bit_depth
+        ));
+    }
+    let expected_len = bytes_per_row
+        .checked_mul(panel_height)
+        .ok_or_else(|| format!("Image dimensions overflow: {} x {}", bytes_per_row, panel_height))?;
+    if pixels.len() < expected_len {
+        return Err(format!(
+            "PNG pixel buffer too small: {} bytes, expected at least {} \
+             ({} bytes/row × {} rows)",
+            pixels.len(),
+            expected_len,
+            bytes_per_row,
+            panel_height
+        ));
+    }
+
     let frame_len = panel_width * panel_height;
     let mut frame: Vec<Spectra6Color> = Vec::new();
     frame
         .try_reserve_exact(frame_len)
         .map_err(|e| format!("OOM frame buffer ({} bytes): {:?}", frame_len, e))?;
     for y in 0..panel_height {
-        let row_start = y * image.bytes_per_row();
+        let row = &pixels[y * bytes_per_row..(y + 1) * bytes_per_row];
         for x in 0..panel_width {
-            frame.push(png_palette[image.pixels()[row_start + x] as usize]);
+            let palette_index = palette_index_at(row, x, bit_depth);
+            frame.push(png_palette[palette_index as usize]);
         }
     }
     Ok(frame)
+}
+
+/// Extract the palette index for pixel `x` in a row packed at `bit_depth`
+/// bits per pixel. PNG packs sub-byte pixels MSB-first — the leftmost
+/// pixel lives in the high-order bits of each byte — and `bit_depth` is
+/// always a divisor of 8 (1, 2, 4, or 8), so pixels never straddle bytes.
+fn palette_index_at(row: &[u8], x: usize, bit_depth: u8) -> u8 {
+    let bit_pos = x * bit_depth as usize;
+    let byte = row[bit_pos / 8];
+    let shift = 8 - bit_depth - (bit_pos % 8) as u8;
+    let mask = (1u8 << bit_depth) - 1;
+    (byte >> shift) & mask
 }
 
 #[esp_rtos::main]
