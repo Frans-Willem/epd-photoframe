@@ -1,5 +1,20 @@
 # TODO
 
+## Exit config mode without saving
+
+Once the device is in config mode the only way out without committing
+new credentials is a full power-cycle, which is awkward if the user
+walked into config mode by accident (or just wants to leave the
+existing NVS values in place). Wire up the Refresh button to perform
+a software reset while in config mode, mirroring the save-and-reset
+path but skipping the NVS write. Watch for a Refresh press via an
+async task racing against the portal's `SAVE_SIGNAL`; whichever fires
+first wins.
+
+The panel instructions + the portal HTML should both mention this:
+"Press Refresh to leave config mode without changes." Check that the
+instruction layout still fits on the portrait E1004 when extended.
+
 ## Honour a `Refresh` header on the image response
 
 The image server may return a `Refresh: <seconds>[; url=<new URL>]`
