@@ -365,7 +365,33 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
 
 use reterminal_e100x::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
 
-use embedded_io_async::BufRead;
+use embedded_io_async::Read;
+
+/// Parse an `http://host[:port]/path[?query]` URL into its addressable
+/// parts. HTTPS isn't supported (we intentionally don't ship embedded-tls)
+/// so anything else is rejected up front.
+fn parse_http_url(url: &str) -> Result<(&str, u16, &str), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("URL must start with http:// : {}", url))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match authority.rfind(':') {
+        Some(i) => {
+            let p: u16 = authority[i + 1..]
+                .parse()
+                .map_err(|_| format!("Invalid port in {}", url))?;
+            (&authority[..i], p)
+        }
+        None => (authority, 80u16),
+    };
+    if host.is_empty() {
+        return Err(format!("Empty host in {}", url));
+    }
+    Ok((host, port, path))
+}
 
 /// Fetch a pre-quantised palette PNG from `url`, decode it, and map its
 /// palette entries onto `Spectra6Color`, returning a row-major frame buffer
@@ -379,57 +405,123 @@ async fn try_build_frame<'t>(
     panel_width: usize,
     panel_height: usize,
 ) -> Result<Vec<Spectra6Color>, String> {
-    let dns = embassy_net::dns::DnsSocket::new(stack);
-    let tcp_state = embassy_net::tcp::client::TcpClientState::<1, 4096, 4096>::new();
-    let tcp = embassy_net::tcp::client::TcpClient::new(stack, &tcp_state);
+    use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let (host, port, path) = parse_http_url(url)?;
+
+    // Resolve the host to an IPv4 address. IP-literal hosts skip the DNS
+    // round-trip; everything else goes through embassy-net's resolver
+    // (which is seeded by the DHCP server option on connect).
+    let ip: Ipv4Addr = if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        ip
+    } else {
+        let dns = embassy_net::dns::DnsSocket::new(stack);
+        let addrs = dns
+            .query(host, embassy_net::dns::DnsQueryType::A)
+            .await
+            .map_err(|e| format!("DNS {}: {:?}", host, e))?;
+        let v4 = addrs.iter().find_map(|a| match a {
+            embassy_net::IpAddress::Ipv4(v) => Some(*v),
+        });
+        v4.ok_or_else(|| format!("DNS: no A record for {}", host))?
+    };
+    let addr = SocketAddr::new(IpAddr::V4(ip), port);
+    println!("Resolved {} -> {}", host, addr);
+
+    let tcp_buffers: edge_nal_embassy::TcpBuffers<1, 4096, 4096> =
+        edge_nal_embassy::TcpBuffers::new();
+    let tcp = edge_nal_embassy::Tcp::new(stack, &tcp_buffers);
+
+    let host_header = if port == 80 {
+        String::from(host)
+    } else {
+        format!("{}:{}", host, port)
+    };
+    let mut http_buf = [0u8; 4096];
+    let mut conn: edge_http::io::client::Connection<_, 32> =
+        edge_http::io::client::Connection::new(&mut http_buf, &tcp, addr);
 
     println!("Attempting to do HTTP request");
-    let mut http_client = reqwless::client::HttpClient::new(&tcp, &dns);
-    let mut request = http_client
-        .request(reqwless::request::Method::GET, url)
-        .await
-        .map_err(|e| format!("HTTP request: {:?}", e))?;
-
-    println!("HTTP request done?");
-    let mut http_rx_buf = [0u8; 4096];
-    let response = request
-        .send(&mut http_rx_buf)
+    conn.initiate_request(
+        true,
+        edge_http::Method::Get,
+        path,
+        &[
+            ("Host", host_header.as_str()),
+            ("Connection", "close"),
+        ],
+    )
+    .await
+    .map_err(|e| format!("HTTP request: {:?}", e))?;
+    conn.initiate_response()
         .await
         .map_err(|e| format!("HTTP send: {:?}", e))?;
 
-    let status = response.status;
-    let is_text_plain = matches!(
-        response.content_type,
-        Some(reqwless::headers::ContentType::TextPlain)
-    );
+    // Snapshot the status + Content-Type before we release the header
+    // borrow and start reading the body. The full Content-Type (with any
+    // `; charset=...` parameters) is kept verbatim for error messages;
+    // we'll normalise to a base type for classification below.
+    let (status_code, content_type) = {
+        let headers = conn
+            .headers()
+            .map_err(|e| format!("HTTP headers: {:?}", e))?;
+        (headers.code, headers.headers.content_type().map(String::from))
+    };
 
     println!("Reading body");
-    let mut reader = response.body().reader();
     let mut body: Vec<u8> = Vec::new();
-    loop {
-        let chunk = reader
-            .fill_buf()
-            .await
-            .map_err(|e| format!("HTTP read: {:?}", e))?;
-        if chunk.is_empty() {
-            break;
+    let mut chunk = [0u8; 1024];
+    {
+        let (_, body_reader) = conn.split();
+        loop {
+            let n = body_reader
+                .read(&mut chunk)
+                .await
+                .map_err(|e| format!("HTTP read: {:?}", e))?;
+            if n == 0 {
+                break;
+            }
+            body.try_reserve(n)
+                .map_err(|e| format!("OOM reading body at {} bytes: {:?}", body.len(), e))?;
+            body.extend_from_slice(&chunk[..n]);
         }
-        body.try_reserve(chunk.len())
-            .map_err(|e| format!("OOM reading body at {} bytes: {:?}", body.len(), e))?;
-        body.extend_from_slice(chunk);
-        let n = chunk.len();
-        reader.consume(n);
     }
     body.shrink_to_fit();
     println!("Got body ({} bytes)", body.len());
 
-    if !status.is_successful() {
-        let body_str = core::str::from_utf8(&body).unwrap_or("<non-utf8 body>");
-        return Err(format!("HTTP {}: {}", status.0, body_str));
+    // Classify: the server can hand us an error message as `text/plain`
+    // (even with a 200), a PNG payload as `image/png` /
+    // `application/octet-stream` / no Content-Type, or something else
+    // we don't know what to do with.
+    let ct_base = content_type
+        .as_deref()
+        .map(|s| s.split(';').next().unwrap_or("").trim());
+    let body_str = || core::str::from_utf8(&body).unwrap_or("<non-utf8 body>");
+
+    if ct_base.is_some_and(|s| s.eq_ignore_ascii_case("text/plain")) {
+        // text/plain is always an error surface, regardless of status code.
+        return Err(format!("HTTP {}: {}", status_code, body_str()));
     }
-    if is_text_plain {
-        let body_str = core::str::from_utf8(&body).unwrap_or("<non-utf8 body>");
-        return Err(format!("Server: {}", body_str));
+    if !(200..300).contains(&status_code) {
+        // Only surface the body as text when the caller plausibly meant
+        // it as a message (no Content-Type at all). Binary bodies on an
+        // error status are just shown as the code.
+        return match ct_base {
+            None => Err(format!("HTTP {}: {}", status_code, body_str())),
+            Some(_) => Err(format!("HTTP {}", status_code)),
+        };
+    }
+    match ct_base {
+        None => {}
+        Some(s)
+            if s.eq_ignore_ascii_case("image/png")
+                || s.eq_ignore_ascii_case("application/octet-stream") => {}
+        Some(_) => {
+            return Err(format!(
+                "Unexpected Content-Type: {}",
+                content_type.as_deref().unwrap_or("")
+            ));
+        }
     }
 
     println!("Decode PNG");

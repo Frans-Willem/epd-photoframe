@@ -61,7 +61,6 @@ embedded-hal = "1.0.0"
 arrayvec = { version = "0.7.6", default-features = false }
 embedded-hal-async = "1.0.0"
 embedded-graphics = "0.8.2"
-reqwless = { version = "0.14.0", default-features = false }
 minipng = "1.0.0"
 esp-storage = { version = "0.8.1", features = ["esp32s3"] }
 esp-nvs = { version = "0.4.0", features = ["esp32s3"] }
