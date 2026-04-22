@@ -44,21 +44,6 @@ Likely shape:
 Keep the query-string-param backup in mind for servers / clients that
 strip custom headers.
 
-## `Refresh` header URL override needs RTC-retained memory
-
-The `Refresh: <secs>[; url=<new URL>]` header is parsed and the
-interval is used for the next deep-sleep, but the `url` parameter is
-currently just logged and dropped. The user's intent: let the server
-hand out a one-shot override URL (e.g. "next refresh, serve this
-different page") that doesn't overwrite the configured base in NVS.
-
-Needs RTC-retained memory — content that survives deep sleep but is
-lost on power-off, which is the right TTL for a single-shot override.
-Wire up an `#[link_section = ".rtc_noinit"]` static (or an equivalent
-esp-hal primitive) and, on wake, check it *before* reading `image.url`
-from NVS. Same scaffolding will be useful for the DHCP-lease cache
-(see separate TODO).
-
 ## Harmonise padding between the QR and instructions area
 
 On the config-mode screen the QR code sits inside a 32 px margin (see
@@ -95,20 +80,41 @@ call sites can share the wrapper since they both use `FONT_10X20`.
 
 ## Persist DHCP lease in RTC memory
 
-Once the `Refresh`-header work has RTC-retained memory wired up for
-the one-shot URL override, it'd be cheap to also stash the current
-DHCP lease (IP, mask, gateway, DNS, lease TTL) there. On the next
-wake we'd skip the DHCP request entirely (`embassy_net::Config::
-ipv4_static` with the retained values) as long as the lease hasn't
-expired and the network is presumably the same. Saves a round-trip
-(~100-300 ms on a decent AP) per wake — noticeable over a day of
-timer-driven refreshes.
+The RTC-persisted storage scaffolding (`src/rtc_persisted.rs`) is
+now wired up for the `Refresh:` header URL override. Stashing the
+current DHCP lease (IP, mask, gateway, DNS, lease TTL) in another
+`RtcPersisted<…>` slot would let the next wake skip the DHCP
+request entirely (`embassy_net::Config::ipv4_static` with the
+retained values) as long as the lease hasn't expired and the
+network is presumably the same. Saves a round-trip (~100-300 ms on
+a decent AP) per wake — noticeable over a day of timer-driven
+refreshes.
 
-Fall back to DHCP on: lease expired, retained values unreadable, or
-any failure on the first probe (e.g. gateway no longer responding).
-Sketch the fall-back as "try the static config, ping gateway, on
-failure tear down + redo with DHCP" — straightforward enough once
-the RTC-memory scaffolding exists.
+Fall back to DHCP on: lease expired, retained values unreadable,
+or any failure on the first probe (e.g. gateway no longer
+responding). Sketch the fall-back as "try the static config, ping
+gateway, on failure tear down + redo with DHCP."
+
+## Compensate deep-sleep duration for time spent awake
+
+The server's `Refresh: N` header means "next refresh in N seconds from
+when you received this response." We currently start the deep-sleep
+timer at `rtc.sleep_deep(..)`, which is several seconds later — after
+the full panel refresh (~20 s on Spectra 6) and the UART flush. Each
+cycle drifts later than the server intended by roughly the
+fetch-to-sleep elapsed time.
+
+Fix: snapshot `rtc.time_since_boot()` right after `try_build_frame`
+returns successfully, and at deep-sleep time subtract the elapsed
+from the server-supplied interval (floored at some small minimum so
+we don't end up with `Duration::ZERO` on a very short interval). The
+internal default interval doesn't need this compensation since it's
+"~4 hours" rather than "at wallclock :05, :10, :15, …".
+
+Adjacent measurement worth capturing while we're there: log the
+wall-clock delta between receiving the response and initiating deep
+sleep, so we know empirically how much compensation is needed and
+whether it varies with panel size / refresh type.
 
 ## Button presses during refresh are ignored
 
@@ -224,6 +230,22 @@ peripherals-ownership story would get a bit hand-wavy. Worth
 looking at what `esp_hal::uart::UartTx::new` actually does to see
 whether splitting the registers / using the existing `Uart` type
 alongside esp-println is explicitly supported.
+
+## Off-the-shelf URL helper crate
+
+`src/url.rs` rolls its own URL-resolution (`resolve(base, relative)`)
+and query-param append (`append_query_param`). Reasonable shortcut
+today — we only need a handful of specific transforms — but a
+proper no_std URL crate would handle the corners we currently don't
+(dot-segments, fragments in the base, percent-encoding of appended
+values). Candidates worth checking: `nourl` (already pulled in
+transitively by some embedded-nal-async stack, very minimal),
+`fluent-uri`, or `url` in no_std mode if its deps line up with
+ours.
+
+Swap once there's a pain point the hand-rolled helpers can't
+handle cleanly — right now they fit every URL the server has
+thrown at us.
 
 ## Re-audit direct dependencies
 

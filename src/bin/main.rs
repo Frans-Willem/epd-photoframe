@@ -33,7 +33,28 @@ use reterminal_e100x::config::Config;
 use reterminal_e100x::config_mode;
 use reterminal_e100x::error_image;
 use reterminal_e100x::hardware::{HardwareCtx, WakeAction, WifiCredentials};
+use reterminal_e100x::rtc_persisted::RtcPersisted;
 use reterminal_e100x::spectra6::Spectra6Color;
+
+// Two URL slots live in RTC-slow RAM so they survive deep sleep:
+//
+// - `CURRENT_URL` — what's "currently displayed" on the panel. The
+//   normal flow reads (doesn't consume) this on every wake and uses
+//   it as the base to fetch. Empty on first boot / after a cold
+//   power-on, in which case `main_normal` falls back to the NVS
+//   `image.url`.
+// - `REDIRECT_URL` — a pending redirect from the previous cycle's
+//   `Refresh:` header. Only honoured on a Timer wake (server-driven
+//   refresh); any other wake cancels it, like a browser drops a
+//   meta-refresh timer when the user clicks a link.
+//
+// `heapless::String` caps the length at compile time so each slot has
+// a fixed footprint.
+const STORED_URL_MAX: usize = 512;
+#[esp_hal::ram(unstable(rtc_slow, persistent))]
+static CURRENT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersisted::new();
+#[esp_hal::ram(unstable(rtc_slow, persistent))]
+static REDIRECT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersisted::new();
 
 #[cfg(feature = "e1002")]
 use reterminal_e100x::gdep073e01::{self as panel, Gdep073e01};
@@ -265,28 +286,67 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     spawner.spawn(wifi_task(wifi_controller)).unwrap();
     spawner.spawn(net_task(net_runner)).unwrap();
 
-    // Chain two stages that each might fail with a user-visible message:
+    // Figure out what to fetch this cycle. Start from whatever's in
+    // RTC (defaulting to the NVS URL on cold boot) and adjust per the
+    // wake reason:
+    //
+    // - Timer wake: take the pending redirect if any, else keep the
+    //   current URL minus any leftover `action=` from a previous
+    //   button wake.
+    // - Any other wake (FreshBoot / Refresh / Previous / Next):
+    //   cancel any pending redirect like browser navigation cancels
+    //   a meta-refresh, strip the old `action=`, and re-append a
+    //   fresh one for button wakes.
+    //
+    // The result is written back to `CURRENT_URL` so the display's
+    // "current state" in RTC always matches what we actually fetched.
+    let current_url: String = CURRENT_URL
+        .get()
+        .map(|s| String::from(s.as_str()))
+        .unwrap_or_else(|| creds.base_url.clone());
+    let current_url: String = match wake_action {
+        WakeAction::Timer => match REDIRECT_URL.take() {
+            Some(r) => {
+                println!("Committing pending redirect as current URL: {}", r);
+                String::from(r.as_str())
+            }
+            None => reterminal_e100x::url::strip_query_param(&current_url, "action"),
+        },
+        other => {
+            REDIRECT_URL.clear();
+            let stripped = reterminal_e100x::url::strip_query_param(&current_url, "action");
+            match other.action_name() {
+                Some(name) => {
+                    reterminal_e100x::url::append_query_param(&stripped, "action", name)
+                }
+                None => stripped,
+            }
+        }
+    };
+    match heapless::String::<STORED_URL_MAX>::try_from(current_url.as_str()) {
+        Ok(s) => CURRENT_URL.set(s),
+        Err(()) => {
+            println!(
+                "Current URL too long ({} bytes) to persist in RTC; NVS fallback after next cold boot",
+                current_url.len()
+            );
+            CURRENT_URL.clear();
+        }
+    }
+
+    // Two stages that each might fail with a user-visible message:
     //  1) wait for the network to come up (bounded by a timeout and a
-    //     fast bail-out on auth failure, so wrong creds don't brick the
-    //     device), and
+    //     fast bail-out on auth failure, so wrong creds don't brick
+    //     the device), and
     //  2) fetch + decode the image.
-    // Any `Err` short-circuits to `error_image::render`, which then goes
-    // through the same panel-refresh path as a successful frame.
+    // Any `Err` short-circuits to `error_image::render`, which then
+    // goes through the same panel-refresh path as a successful frame.
     let fetch_result: Result<FetchOutcome, String> = async {
         wait_for_network_ready(net_stack, WIFI_LINK_TIMEOUT)
             .await
             .map_err(|e| e.message(&creds.ssid))?;
-        let url: String = match wake_action.action_name() {
-            Some(action) => {
-                // Respect any query string already on the configured base
-                // URL by picking the right separator.
-                let sep = if creds.base_url.contains('?') { '&' } else { '?' };
-                format!("{}{}action={}", creds.base_url, sep, action)
-            }
-            None => creds.base_url.clone(),
-        };
-        println!("Fetching {}", url);
-        try_build_frame(net_stack, &url, panel_width, panel_height).await
+        println!("Fetching {}", current_url);
+        try_build_frame(net_stack, &current_url, panel_width, panel_height).await
     }
     .await;
 
@@ -296,12 +356,37 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // anything.
     let (frame, sleep_duration) = match fetch_result {
         Ok(FetchOutcome { frame, refresh }) => {
+            match refresh.as_ref().and_then(|h| h.url_override.as_deref()) {
+                // The server often sends relative URLs (e.g. just
+                // `/screen/foo`), so resolve against whatever we just
+                // fetched rather than the NVS base.
+                Some(raw) => match reterminal_e100x::url::resolve(&current_url, raw) {
+                    Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str())
+                    {
+                        Ok(stored) => {
+                            println!("Stashing redirect URL for next Timer wake: {}", abs);
+                            REDIRECT_URL.set(stored);
+                        }
+                        Err(()) => {
+                            println!(
+                                "Redirect URL too long ({} bytes); dropping",
+                                abs.len()
+                            );
+                            REDIRECT_URL.clear();
+                        }
+                    },
+                    None => {
+                        println!("Unresolvable redirect URL {:?}; dropping", raw);
+                        REDIRECT_URL.clear();
+                    }
+                },
+                // No pending redirect from the server — leave the slot
+                // empty (already cleared on entry for non-Timer wakes;
+                // `take()`n on entry for Timer wakes).
+                None => {}
+            }
             if let Some(hint) = &refresh {
-                println!(
-                    "Server Refresh hint: interval={:?} url_override={:?}",
-                    hint.interval, hint.url_override
-                );
-                // url_override not yet persisted — see TODO.
+                println!("Server Refresh interval: {:?}", hint.interval);
             }
             let sleep = refresh
                 .map(|h| h.interval)
@@ -310,6 +395,11 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         }
         Err(msg) => {
             println!("Falling back to error image: {}", msg);
+            // Clear CURRENT_URL so the next wake falls back to the NVS
+            // base URL — if the stored current URL is what caused the
+            // error (e.g. a bad redirect committed last cycle), a
+            // transient retry against the same URL would just loop.
+            CURRENT_URL.clear();
             (
                 error_image::render(panel_width, panel_height, &msg),
                 DEFAULT_ERROR_SLEEP,
@@ -821,6 +911,8 @@ async fn main(spawner: Spawner) -> ! {
          held[refresh={refresh_held} previous={previous_held} next={next_held}] \
          uptime={time_since_boot:?}"
     );
+    println!("RTC CURRENT_URL: {:?}", CURRENT_URL.get().as_deref());
+    println!("RTC REDIRECT_URL: {:?}", REDIRECT_URL.get().as_deref());
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
@@ -1002,6 +1094,12 @@ async fn main(spawner: Spawner) -> ! {
     {
         main_normal(hw, creds).await
     } else {
+        // Entering config mode is a deliberate reset of the device's
+        // "what's displayed" state — whatever URL was committed last
+        // cycle (and any pending redirect) is no longer relevant once
+        // the user has reconfigured.
+        CURRENT_URL.clear();
+        REDIRECT_URL.clear();
         config_mode::run(hw, config).await
     }
 }

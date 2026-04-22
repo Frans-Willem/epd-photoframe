@@ -16,5 +16,7 @@ pub mod hardware;
 pub mod iter_util;
 pub mod net_resources;
 pub mod qr_image;
+pub mod rtc_persisted;
 pub mod spectra6;
 pub mod t133a01;
+pub mod url;
