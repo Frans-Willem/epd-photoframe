@@ -246,8 +246,13 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         wait_for_network_ready(net_stack, WIFI_LINK_TIMEOUT)
             .await
             .map_err(|e| e.message(&creds.ssid))?;
-        let url: String = match wake_action.query() {
-            Some(q) => format!("{}{}", creds.base_url, q),
+        let url: String = match wake_action.action_name() {
+            Some(action) => {
+                // Respect any query string already on the configured base
+                // URL by picking the right separator.
+                let sep = if creds.base_url.contains('?') { '&' } else { '?' };
+                format!("{}{}action={}", creds.base_url, sep, action)
+            }
             None => creds.base_url.clone(),
         };
         println!("Fetching {}", url);

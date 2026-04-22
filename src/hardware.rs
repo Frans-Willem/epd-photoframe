@@ -54,13 +54,16 @@ pub enum WakeAction {
 }
 
 impl WakeAction {
-    /// Query-string fragment to append to the base URL, e.g. `"?action=refresh"`.
-    /// `None` means fetch the base URL unchanged.
-    pub fn query(self) -> Option<&'static str> {
+    /// Name of the `action=` query-string parameter to append to the
+    /// base URL, or `None` if the base URL should be fetched unchanged.
+    /// The caller is responsible for picking the right `?` / `&`
+    /// separator depending on whether the base URL already carries a
+    /// query string.
+    pub fn action_name(self) -> Option<&'static str> {
         match self {
-            WakeAction::Refresh => Some("?action=refresh"),
-            WakeAction::Previous => Some("?action=previous"),
-            WakeAction::Next => Some("?action=next"),
+            WakeAction::Refresh => Some("refresh"),
+            WakeAction::Previous => Some("previous"),
+            WakeAction::Next => Some("next"),
             WakeAction::FreshBoot | WakeAction::Timer => None,
         }
     }

@@ -24,6 +24,26 @@ change, no schema migration.
 mode-selector (DHCP / static) on the portal form that conditionally
 shows the IP / mask / gateway / DNS fields.
 
+## Report battery / sensor readings to the server
+
+The README's Goal section has always called for per-wake sensor
+reporting (battery, temperature, humidity) but the firmware currently
+fetches the image with no side-band. Send the readings on every
+image GET — either as query-string params, HTTP headers, or a POST
+body — so the server can decide what to render based on current
+state (e.g. low-battery overlay, trending graphs).
+
+Likely shape:
+
+- Read ADC for battery voltage (plus whatever sensors are on the
+  I²C bus — check schematics).
+- Serialise into short header values:
+  `X-Battery-mV: 3920`, `X-Temp-C: 22.4`, etc.
+- Drop them into the `initiate_request` headers in `try_build_frame`.
+
+Keep the query-string-param backup in mind for servers / clients that
+strip custom headers.
+
 ## Honour a `Refresh` header on the image response
 
 The image server may return a `Refresh: <seconds>[; url=<new URL>]`
@@ -44,11 +64,6 @@ follow-ups for the firmware:
    for a successful image (e-paper is fine with hours-scale updates);
    keep 10 minutes for the error-frame path (user will probably want
    to retry soon), but stretch the happy path to something like 2-6 h.
-
-Also fix the URL-action joiner: `try_build_frame` currently appends
-`?action=...` unconditionally, which breaks URLs that already carry a
-query string. Check whether the URL already contains a `?` and use
-`&action=...` when it does.
 
 ## Harmonise padding between the QR and instructions area
 
