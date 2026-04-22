@@ -95,26 +95,57 @@ or any failure on the first probe (e.g. gateway no longer
 responding). Sketch the fall-back as "try the static config, ping
 gateway, on failure tear down + redo with DHCP."
 
-## Compensate deep-sleep duration for time spent awake
+## Server-side "refresh-to-wake-up delay"
 
-The server's `Refresh: N` header means "next refresh in N seconds from
-when you received this response." We currently start the deep-sleep
-timer at `rtc.sleep_deep(..)`, which is several seconds later — after
-the full panel refresh (~20 s on Spectra 6) and the UART flush. Each
-cycle drifts later than the server intended by roughly the
-fetch-to-sleep elapsed time.
+The ESP32-S3's RTC-slow clock runs off an internal 150 kHz RC
+oscillator (neither E1002 nor E1004 routes an external 32 kHz XTAL
+to pins 22/23 — confirmed from the schematics), spec'd at ±5 %.
+Over our current ~5 min refresh that's ±15 s of drift; over a
+24 h target it's ±72 min uncalibrated, or realistically <±60 s once
+we apply the boot-time calibration stored in `LPWR.store1`.
 
-Fix: snapshot `rtc.time_since_boot()` right after `try_build_frame`
-returns successfully, and at deep-sleep time subtract the elapsed
-from the server-supplied interval (floored at some small minimum so
-we don't end up with `Duration::ZERO` on a very short interval). The
-internal default interval doesn't need this compensation since it's
-"~4 hours" rather than "at wallclock :05, :10, :15, …".
+Even with calibration, we'd rather wake *late* than early — waking
+early on a 24 h schedule means two fetches for one scheduled image
+(both battery-expensive), and the server will just tell us "come
+back in a bit" anyway. The cleaner design is a server-side contract:
 
-Adjacent measurement worth capturing while we're there: log the
-wall-clock delta between receiving the response and initiating deep
-sleep, so we know empirically how much compensation is needed and
-whether it varies with panel size / refresh type.
+- Server decides when the next image is scheduled (e.g. aligned to
+  a wallclock schedule).
+- Server also picks a "wake-up delay" — how long after the scheduled
+  regeneration the client should actually wake. This is the budget
+  for residual client-clock drift plus server regeneration time, so
+  the wake always lands comfortably inside the "new image ready"
+  window.
+- Wire this over the `Refresh:` header as-is: the client just sees
+  `Refresh: <scheduled_interval + wake_up_delay>` and the
+  intermediate split is invisible to it. Alternatively, a dedicated
+  header pair (`X-Refresh-At`, `X-Refresh-Delay`) would let the
+  firmware log the two numbers separately for diagnostics.
+
+Pairs with the calibrated-sleep fix below: once the client can hit
+the server's target within a known envelope, the server can pick a
+wake-up delay close to that envelope without risk.
+
+## Calibrated sleep duration — comes with esp-hal 1.1.0 upgrade
+
+esp-hal 1.0's `TimerWakeupSource::apply` (rtc_cntl/sleep/esp32s3.rs)
+computes `ticks = duration_us × nominal_slow_hz / 1_000_000` using
+the *nominal* 150 kHz and ignores the calibration value that
+`configure_clock` already wrote to `LPWR.store1` at boot. Over our
+24 h target that's up to ±72 min of drift.
+
+Already fixed upstream in esp-hal 1.1.0-rc.0: `TimerWakeupSource`
+now calls `clock::us_to_rtc_ticks`, which reads the calibrated
+period from `LP_AON.store1()` (written by
+`Clocks::calibrate_rtc_slow_clock` during `esp_hal::init`). No
+firmware-side scaling needed once we're on 1.1.0 — the calibrated
+sleep comes along for free.
+
+So no action here until the dependency cascade below lets us move
+to stable 1.1.0. If we ever need calibrated sleeps sooner, the
+workaround is to read `LPWR::regs().store1()` ourselves (Q13.19 µs
+per slow tick, `CAL_FRACT = 19`) and pre-distort the `Duration`
+passed to `TimerWakeupSource::new`.
 
 ## Button presses during refresh are ignored
 

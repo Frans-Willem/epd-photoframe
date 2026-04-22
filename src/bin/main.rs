@@ -185,12 +185,12 @@ const WIFI_LINK_TIMEOUT: Duration = Duration::from_secs(30);
 /// doesn't send a `Refresh` header. E-ink is fine with hours-scale
 /// refreshes and most dashboard content doesn't change faster than
 /// that; the server can override on a per-response basis.
-const DEFAULT_SUCCESS_SLEEP: core::time::Duration = core::time::Duration::from_hours(4);
+const DEFAULT_SUCCESS_SLEEP: embassy_time::Duration = embassy_time::Duration::from_secs(4 * 60 * 60);
 
 /// Deep-sleep duration on the error path. Shorter than success so a
 /// transient failure (WiFi glitch, server hiccup) recovers on the next
 /// wake without the user having to push a button.
-const DEFAULT_ERROR_SLEEP: core::time::Duration = core::time::Duration::from_mins(10);
+const DEFAULT_ERROR_SLEEP: embassy_time::Duration = embassy_time::Duration::from_secs(600);
 
 enum NetworkError {
     ConnectFailed(esp_radio::wifi::WifiError),
@@ -353,8 +353,11 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // Success ⇒ use the server's `Refresh` hint if it sent one, else
     // the long-form default. Error ⇒ short retry default so a
     // transient issue gets another shot without the user pressing
-    // anything.
-    let (frame, sleep_duration) = match fetch_result {
+    // anything. `wakeup_requested` is an absolute `Instant` so the
+    // time we then spend on the panel refresh + UART flush is
+    // automatically subtracted from the sleep duration when we
+    // compute it below.
+    let (frame, wakeup_requested): (_, embassy_time::Instant) = match fetch_result {
         Ok(FetchOutcome { frame, refresh }) => {
             match refresh.as_ref().and_then(|h| h.url_override.as_deref()) {
                 // The server often sends relative URLs (e.g. just
@@ -385,13 +388,10 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 // `take()`n on entry for Timer wakes).
                 None => {}
             }
-            if let Some(hint) = &refresh {
-                println!("Server Refresh interval: {:?}", hint.interval);
-            }
-            let sleep = refresh
-                .map(|h| h.interval)
-                .unwrap_or(DEFAULT_SUCCESS_SLEEP);
-            (frame, sleep)
+            let wakeup = refresh
+                .map(|h| h.refresh_time)
+                .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_SUCCESS_SLEEP);
+            (frame, wakeup)
         }
         Err(msg) => {
             println!("Falling back to error image: {}", msg);
@@ -400,10 +400,8 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
             // error (e.g. a bad redirect committed last cycle), a
             // transient retry against the same URL would just loop.
             CURRENT_URL.clear();
-            (
-                error_image::render(panel_width, panel_height, &msg),
-                DEFAULT_ERROR_SLEEP,
-            )
+            let wakeup = embassy_time::Instant::now() + DEFAULT_ERROR_SLEEP;
+            (error_image::render(panel_width, panel_height, &msg), wakeup)
         }
     };
 
@@ -458,6 +456,19 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     ];
     let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
 
+    // Convert the absolute wake-up `Instant` back into a relative
+    // duration as late as possible, so any time still spent below
+    // (UART flush etc.) doesn't inflate it. `sleep_deep` takes a
+    // `core::time::Duration`, so we bridge through micros.
+    //
+    // Note: the actual sleep duration can still drift by a few percent
+    // relative to what we pass here — esp-hal 1.0's
+    // `TimerWakeupSource::apply` uses the nominal 150 kHz for the
+    // conversion and ignores the calibration it already performed at
+    // boot. Fixed upstream in esp-hal 1.1.0 (picked up once the rest
+    // of the dependency cascade lands).
+    let remaining = wakeup_requested.saturating_duration_since(embassy_time::Instant::now());
+    let sleep_duration = core::time::Duration::from_micros(remaining.as_micros());
     println!("Deep sleep for {:?}", sleep_duration);
     let timer_wake_source = esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(sleep_duration);
     let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] =
@@ -551,13 +562,16 @@ fn parse_http_url(url: &str) -> Result<(&str, u16, &str), String> {
 }
 
 /// Optional server hint parsed from the `Refresh:` response header —
-/// carries how long the firmware should wait before the next fetch,
-/// and optionally a one-shot URL override for that next fetch.
+/// carries the target `Instant` at which the next fetch should happen
+/// (computed from the server's interval plus whenever the response
+/// headers arrived) and an optional one-shot URL override for that
+/// fetch. Using an absolute `Instant` instead of a raw interval means
+/// the time we spend on the panel refresh and the UART flush between
+/// "headers received" and `sleep_deep` is automatically subtracted,
+/// so the next wake lines up with the server's intended cadence.
 #[derive(Debug, Clone)]
 struct RefreshHint {
-    interval: core::time::Duration,
-    /// Not yet consumed — RTC-retained memory for the override URL is
-    /// still a TODO. Parsed eagerly so the logging surfaces it.
+    refresh_time: embassy_time::Instant,
     url_override: Option<String>,
 }
 
@@ -568,9 +582,12 @@ struct FetchOutcome {
     refresh: Option<RefreshHint>,
 }
 
-/// Parse a `Refresh: <secs>[; url=<url>]` header value. Returns `None`
-/// for anything that doesn't start with a non-negative integer.
-fn parse_refresh_header(value: &str) -> Option<RefreshHint> {
+/// Parse a `Refresh: <secs>[; url=<url>]` header value into a
+/// `(Duration, Option<url>)`. Returns `None` for anything that doesn't
+/// start with a non-negative integer. The caller adds the `Duration`
+/// to the `Instant` at which the response headers arrived to build a
+/// `RefreshHint`.
+fn parse_refresh_header(value: &str) -> Option<(embassy_time::Duration, Option<String>)> {
     let value = value.trim();
     let (secs_part, rest) = match value.split_once(';') {
         Some((a, b)) => (a.trim(), Some(b.trim())),
@@ -591,10 +608,7 @@ fn parse_refresh_header(value: &str) -> Option<RefreshHint> {
         };
         if v.is_empty() { None } else { Some(String::from(v)) }
     });
-    Some(RefreshHint {
-        interval: core::time::Duration::from_secs(interval_secs),
-        url_override,
-    })
+    Some((embassy_time::Duration::from_secs(interval_secs), url_override))
 }
 
 /// Fetch a pre-quantised palette PNG from `url`, decode it, and map its
@@ -657,6 +671,12 @@ async fn try_build_frame<'t>(
     conn.initiate_response()
         .await
         .map_err(|e| format!("HTTP send: {:?}", e))?;
+    // Anchor the refresh target as close as possible to the moment
+    // the server's response arrived. Everything between here and
+    // `sleep_deep` (body read, PNG decode, panel refresh, UART flush)
+    // then counts against the server's interval rather than adding to
+    // it.
+    let headers_received_at = embassy_time::Instant::now();
 
     // Snapshot the status + Content-Type + any `Refresh:` hint before
     // we release the header borrow and start reading the body. The
@@ -667,10 +687,18 @@ async fn try_build_frame<'t>(
         let headers = conn
             .headers()
             .map_err(|e| format!("HTTP headers: {:?}", e))?;
-        let refresh = headers
-            .headers
-            .get("Refresh")
-            .and_then(parse_refresh_header);
+        let refresh = headers.headers.get("Refresh").and_then(|v| {
+            parse_refresh_header(v).map(|(interval, url_override)| {
+                println!(
+                    "Server Refresh interval: {} s from headers-received",
+                    interval.as_secs()
+                );
+                RefreshHint {
+                    refresh_time: headers_received_at + interval,
+                    url_override,
+                }
+            })
+        });
         (
             headers.code,
             headers.headers.content_type().map(String::from),
