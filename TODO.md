@@ -75,6 +75,23 @@ Worth prototyping all three once Stage 3c is stable — if the per-crate
 code size stays reasonable, the dep simplification + consistent error
 types are probably worth it.
 
+## Re-audit direct dependencies
+
+Some direct `[dependencies]` entries were added for crates that have
+since been ripped out (e.g. `heapless` came in with `leasehund`; that's
+gone, but we still use one `heapless::Vec::new()` call in
+`config_mode.rs` to build `StaticConfigV4.dns_servers`). Worth a sweep
+to confirm each direct dep has a real call site that isn't served by a
+re-export we already have in the tree.
+
+For `heapless` specifically: if the only use is the DNS-servers Vec in
+the static AP config, we could build it from an array literal via
+`heapless::Vec::from_slice` or similar helper — but since the type is
+forced on us by embassy-net, getting rid of the direct dep entirely
+would need either embassy-net to re-export `heapless` (unlikely) or us
+to thread that one helper through a different crate. Low priority;
+just document it.
+
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 
 The `esp-hal` / `esp-rtos` / `esp-radio` / `esp-alloc` / embassy stack is

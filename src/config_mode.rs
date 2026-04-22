@@ -175,19 +175,53 @@ async fn ap_wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) 
 }
 
 /// Serve DHCP on the AP interface so phones joining the captive-portal
-/// network get an IP address immediately (otherwise modern phones time out
-/// the join and drop the network as "no internet"). `run` loops forever.
+/// network get an IP address immediately (otherwise modern phones time
+/// out the join and drop the network as "no internet"). The server runs
+/// on top of `edge-nal-embassy`'s UDP socket and uses `edge-dhcp`'s
+/// state machine — same abstraction stack as the DNS hijack and HTTP
+/// portal, so all three services share buffers/idioms.
 #[embassy_executor::task]
 async fn dhcp_server_task(stack: Stack<'static>) {
-    let mut server = leasehund::DhcpServer::<8, 1>::new_with_dns(
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // server IP
-        core::net::Ipv4Addr::new(255, 255, 255, 0), // subnet mask
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // gateway
-        core::net::Ipv4Addr::new(192, 168, 4, 1),   // DNS (self; see dns_hijack_task)
-        core::net::Ipv4Addr::new(192, 168, 4, 100), // pool start
-        core::net::Ipv4Addr::new(192, 168, 4, 200), // pool end
+    use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use edge_nal::UdpBind;
+
+    let ap_ip = Ipv4Addr::new(192, 168, 4, 1);
+    let udp_buffers: edge_nal_embassy::UdpBuffers<1, 1500, 1500, 2> =
+        edge_nal_embassy::UdpBuffers::new();
+    let udp = edge_nal_embassy::Udp::new(stack, &udp_buffers);
+
+    let dns_servers = [ap_ip];
+    let mut gateway_buf = [Ipv4Addr::UNSPECIFIED; 1];
+    let mut server_options = edge_dhcp::server::ServerOptions::new(ap_ip, Some(&mut gateway_buf));
+    server_options.dns = &dns_servers;
+
+    // `edge-dhcp` defaults the pool to .50-.200 of the server's /24; keep
+    // that instead of pinning it here. MAX_CLIENTS=8 matches the old
+    // leasehund setup.
+    let mut server = edge_dhcp::server::Server::<_, 8>::new(
+        || embassy_time::Instant::now().as_secs(),
+        ap_ip,
     );
-    server.run(stack).await
+
+    let mut buf = [0u8; 1500];
+    loop {
+        match udp
+            .bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 67))
+            .await
+        {
+            Ok(mut socket) => {
+                match edge_dhcp::io::server::run(&mut server, &server_options, &mut socket, &mut buf)
+                    .await
+                {
+                    Ok(()) => println!("DHCP server returned Ok; restarting"),
+                    Err(e) => println!("DHCP server error ({:?}); restarting", e),
+                }
+            }
+            Err(e) => println!("DHCP bind :67 failed ({:?}); retrying", e),
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
 }
 
 /// Captive-portal DNS hijack: reply to every `A` query with the AP's own
