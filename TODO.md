@@ -1,5 +1,31 @@
 # TODO
 
+## Honour a `Refresh` header on the image response
+
+The image server may return a `Refresh: <seconds>[; url=<new URL>]`
+header (same semantics as the HTML meta-refresh equivalent). Three
+follow-ups for the firmware:
+
+1. **Use that interval for the next deep-sleep** instead of the
+   hard-coded 10 minutes, so the server can throttle / accelerate
+   updates server-side without a firmware change.
+2. **If a URL is supplied**, stash it in RTC-retained memory so the
+   next wake fetches *that* URL instead of `image.url` from NVS. The
+   user's intent: let the server hand out a one-shot override URL
+   (e.g. "next refresh, serve this different page") that doesn't
+   overwrite the configured base. Anything in RTC memory is lost on
+   power-off, which is the right TTL for a single-shot override.
+3. **Reconsider the default sleep duration** we fall back to when the
+   server doesn't send a `Refresh` header. 10 minutes is aggressive
+   for a successful image (e-paper is fine with hours-scale updates);
+   keep 10 minutes for the error-frame path (user will probably want
+   to retry soon), but stretch the happy path to something like 2-6 h.
+
+Also fix the URL-action joiner: `try_build_frame` currently appends
+`?action=...` unconditionally, which breaks URLs that already carry a
+query string. Check whether the URL already contains a `?` and use
+`&action=...` when it does.
+
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
