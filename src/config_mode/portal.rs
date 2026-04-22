@@ -39,8 +39,8 @@ pub const REFRESH_BUTTON_LABEL: &str = "Refresh button (green)";
 #[cfg(feature = "e1004")]
 pub const REFRESH_BUTTON_LABEL: &str = "Refresh button";
 
-const FORM_TEMPLATE: &str = include_str!("portal/form.html");
-const SAVED_HTML: &[u8] = include_bytes!("portal/saved.html");
+const FORM_TEMPLATE: &str = include_str!("form.html");
+const SAVED_HTML: &[u8] = include_bytes!("saved.html");
 
 /// Values parsed from the submitted form, handed from the web handler
 /// to `config_mode::run` so the latter can actually touch NVS and

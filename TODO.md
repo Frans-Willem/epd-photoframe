@@ -145,21 +145,20 @@ can await before pulling the trigger, or whether a short
 reliable enough proxy. Apply the same to the normal-flow
 `sleep_deep` and the config-mode `software_reset` paths.
 
-## Group config-mode code under `src/config_mode/`
+## Scan for nearby WiFi networks in the portal
 
-Everything related to configuration mode currently lives at three
-top-level spots: `src/config_mode.rs`, `src/portal.rs`, and
-`src/portal/*.html`. Move it all into a single subtree:
+The portal's SSID field is free-form text today. A dropdown populated
+from a live scan is easier for the user, especially on phones without
+a password manager that remembers their home network name. Needs
+AP+STA concurrent mode on `esp-radio` — the controller supports
+`ModeConfig::ApSta` but we've never exercised it (config mode is
+AP-only), so expect some bring-up pain getting the STA side to scan
+while the AP is serving the portal.
 
-- `src/config_mode.rs` (top-level file keeps `run()` + its tasks)
-- `src/config_mode/portal.rs` (the HTTP portal)
-- `src/config_mode/form.html`, `src/config_mode/saved.html`
-  (templates)
-
-Adjust `lib.rs` to drop the separate `pub mod portal;` — nothing
-outside `config_mode` uses it externally today — and change
-`use crate::portal;` in the moved files to the relative path. Pure
-code-organisation change, no behavioural impact.
+Probably gate behind a "Scan networks" button rather than scanning
+on every form render; the cost is noticeable and we don't want to
+block portal responsiveness. Keep a free-form text fallback for
+hidden networks.
 
 ## Confirm `.local` / mDNS hostname resolution works
 

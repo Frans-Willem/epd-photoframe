@@ -19,7 +19,8 @@ use crate::config::Config;
 use crate::config_image;
 use crate::hardware::{EpdPanel, HardwareCtx};
 use crate::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
-use crate::portal;
+
+mod portal;
 
 #[cfg(feature = "e1002")]
 use crate::gdep073e01 as panel;

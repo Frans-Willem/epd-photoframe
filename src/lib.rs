@@ -15,7 +15,6 @@ pub mod gdep073e01;
 pub mod hardware;
 pub mod iter_util;
 pub mod net_resources;
-pub mod portal;
 pub mod qr_image;
 pub mod spectra6;
 pub mod t133a01;
