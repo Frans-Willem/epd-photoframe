@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>reTerminal Setup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body { font-family: sans-serif; max-width: 400px; margin: 2em auto; padding: 1em; }
+input { width: 100%; font-size: 1em; padding: .5em; margin: .25em 0; box-sizing: border-box; }
+label { display: block; margin-top: 1em; font-weight: bold; }
+button { padding: .75em 1.5em; font-size: 1em; margin-top: 1em; }
+.hint { font-size: .9em; color: #555; margin-top: 1.5em; }
+.error { background: #fde; border: 1px solid #c33; color: #c33; padding: .75em 1em; border-radius: .25em; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>reTerminal Setup</h1>
+{error}
+<form method="POST" action="/save">
+<label>WiFi SSID<input name="ssid" required maxlength="32" autocomplete="off" value="{ssid}"></label>
+<label>WiFi Password<input name="password" type="password" maxlength="64" autocomplete="off" value="{password}"></label>
+<label>Image URL<input name="url" required maxlength="256" autocomplete="off" value="{url}"></label>
+<button type="submit">Save &amp; Restart</button>
+</form>
+<p class="hint">Press the {refresh_hint} on the device to exit configuration mode without saving.</p>
+</body>
+</html>

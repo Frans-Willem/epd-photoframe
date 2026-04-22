@@ -1,20 +1,5 @@
 # TODO
 
-## Exit config mode without saving
-
-Once the device is in config mode the only way out without committing
-new credentials is a full power-cycle, which is awkward if the user
-walked into config mode by accident (or just wants to leave the
-existing NVS values in place). Wire up the Refresh button to perform
-a software reset while in config mode, mirroring the save-and-reset
-path but skipping the NVS write. Watch for a Refresh press via an
-async task racing against the portal's `SAVE_SIGNAL`; whichever fires
-first wins.
-
-The panel instructions + the portal HTML should both mention this:
-"Press Refresh to leave config mode without changes." Check that the
-instruction layout still fits on the portrait E1004 when extended.
-
 ## Honour a `Refresh` header on the image response
 
 The image server may return a `Refresh: <seconds>[; url=<new URL>]`
@@ -41,6 +26,40 @@ Also fix the URL-action joiner: `try_build_frame` currently appends
 query string. Check whether the URL already contains a `?` and use
 `&action=...` when it does.
 
+## Harmonise padding between the QR and instructions area
+
+On the config-mode screen the QR code sits inside a 32 px margin (see
+`qr_image::MARGIN_PX`) while the instructions start at
+`Point::new(16, 16)` inside their area with no right / bottom margin
+at all. Visually the text strip reads as noticeably "tighter" than
+the QR strip.
+
+Pull both values out of their respective modules into a shared layout
+constant (say 24 px) and apply it consistently: the QR's centring
+margin and the text's top-left offset *and* right / bottom insets
+when wrapping. Pairs naturally with the word-aware-wrap TODO above,
+since the wrapper needs the effective text bounding box anyway.
+
+## Word-aware text wrapping for panel instructions + error frames
+
+Both `config_image::render` (the QR + instructions page) and
+`error_image::render` use a naive wrapping model:
+
+- `config_image`: the instruction text is *hand-wrapped* with explicit
+  `\n` line breaks sized for the narrow landscape E1002 layout. On the
+  E1004 the text strip below the QR is much wider (the QR is at the
+  top of a portrait panel), so those short lines look cramped and
+  ragged.
+- `error_image`: `hard_wrap` breaks at an exact character count,
+  happily splitting mid-word.
+
+Replace both with a word-aware wrapper that takes the text-area
+bounding box (in pixels) and the font's character dimensions, then
+greedily packs words, falling back to mid-word breaks only for words
+that don't fit a line on their own. The wrapped string then feeds
+`embedded_graphics::Text::with_baseline` the same way today. Both
+call sites can share the wrapper since they both use `FONT_10X20`.
+
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
@@ -59,6 +78,99 @@ need it after the image has been fetched. Turn it off as soon as
 `try_build_frame` returns. More generally: audit what's still powered
 between "image in memory" and "deep sleep" and shut down anything we
 don't need.
+
+## Panel-trait abstraction for multi-palette support
+
+The `Gdep073e01` and `T133A01` drivers currently expose duplicate
+method surfaces that main.rs / config_mode.rs call through cfg-gated
+type aliases (`EpdPanel`, `use … as panel`). That works for the two
+Spectra-6 panels we ship today, but the E1001 (grayscale GDEY075T7,
+listed as "not implemented" in the README) has a different palette
+entirely — bolting it on would need yet another cfg arm in every
+caller.
+
+Consolidate by introducing a `Panel` trait that both drivers implement:
+
+- Method surface: `reset`, `init`, `power_on`, `update_frame(impl
+  IntoIterator<Item = Self::PanelColor>)`, `display_frame_no_wait`,
+  `wait_until_idle`, `power_off`, plus the `panel_size()` and
+  `output_index_to_image_xy()` helpers lifted into associated
+  functions.
+- Associated type `PanelColor` that exposes:
+  - `const BLACK: Self` and `const WHITE: Self` (used by the error /
+    white-preflash paths),
+  - `fn all() -> impl Iterator<Item = Self>` (used by the PNG palette
+    quantiser to build a lookup table over every value the panel can
+    display),
+  - `fn to_rgb(self) -> [u8; 3]` (same, for closest-colour matching
+    against PNG palette entries).
+
+That drops `EpdPanel` as a cfg-gated alias and lets main.rs / the
+image pipeline be generic over the panel. The E1001 driver then only
+needs to provide its own PanelColor (probably an 8-level grayscale
+enum) and slot in.
+
+## Audible / visible "config mode entered" feedback
+
+Holding Previous+Next for 10 seconds without any indication that the
+device noticed is unnerving — the user can't tell whether to keep
+holding or if they've already succeeded (the e-ink doesn't re-paint
+until a second or two later). Research options to give immediate
+feedback the moment `entering_config_mode` resolves true:
+
+- **Beep.** Check the E1002 / E1004 schematics for a piezo /
+  speaker — ESP32-S3 has both a LEDC PWM peripheral and DACs that
+  could drive one. If there's hardware, a short tone (~50 ms) at the
+  race-end is the clearest signal.
+- **LED pattern change.** The status LED on GPIO6 already blinks via
+  `blink_task`. As a fallback if there's no audio path, switch to a
+  faster blink (or solid-on) when entering config mode; revert on
+  exit.
+
+Pick whichever the hardware actually supports with minimal extra
+wiring.
+
+## Flush `println!` output before deep sleep / software reset
+
+`esp_println::println!` writes to UART, but we never check that the
+final log lines are fully clocked out before `rtc.sleep_deep` or
+`esp_hal::system::software_reset()`. In practice the last message
+before reboot ("Going to deep sleep :)", "Rebooting", etc.) often
+appears truncated in the serial monitor, which is exactly the window
+where a diagnostic is most useful.
+
+Research whether the esp-hal UART has a drain / wait-for-idle API we
+can await before pulling the trigger, or whether a short
+`embassy_time::Timer::after` (~10 ms at the current baud) is a
+reliable enough proxy. Apply the same to the normal-flow
+`sleep_deep` and the config-mode `software_reset` paths.
+
+## Group config-mode code under `src/config_mode/`
+
+Everything related to configuration mode currently lives at three
+top-level spots: `src/config_mode.rs`, `src/portal.rs`, and
+`src/portal/*.html`. Move it all into a single subtree:
+
+- `src/config_mode.rs` (top-level file keeps `run()` + its tasks)
+- `src/config_mode/portal.rs` (the HTTP portal)
+- `src/config_mode/form.html`, `src/config_mode/saved.html`
+  (templates)
+
+Adjust `lib.rs` to drop the separate `pub mod portal;` — nothing
+outside `config_mode` uses it externally today — and change
+`use crate::portal;` in the moved files to the relative path. Pure
+code-organisation change, no behavioural impact.
+
+## Confirm `.local` / mDNS hostname resolution works
+
+`embassy-net` is built with the `mdns` feature but we've never
+verified the firmware actually resolves `.local` names on a real
+network (e.g. `http://pegasus.local:3000/…` instead of the hostname
+that happens to have DNS). Worth a smoke test — configure an mDNS-
+advertised URL, set it via the portal, and check that
+`embassy_net::dns::DnsSocket::query` returns an address. If it
+doesn't, figure out whether we need an additional feature /
+`embassy-net-mdns` crate or an explicit multicast subscription.
 
 ## Re-audit direct dependencies
 

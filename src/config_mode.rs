@@ -7,14 +7,17 @@
 //! to NVS and trigger a software reset back into the normal flow.
 
 use alloc::format;
+use alloc::string::String;
 
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
+use esp_hal::gpio::{Input, InputConfig, Output, Pull};
+use esp_hal::spi::master::Spi;
 use esp_println::println;
 
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::HardwareCtx;
+use crate::hardware::{EpdPanel, HardwareCtx};
 use crate::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
 use crate::portal;
 
@@ -27,12 +30,25 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     let HardwareCtx {
         spawner,
         wifi,
-        mut spi_bus,
-        mut epd,
-        mut tft_enable,
+        gpio_btn_refresh,
+        spi_bus,
+        epd,
+        tft_enable,
         ..
     } = ctx;
-    let (panel_width, panel_height) = panel::panel_size();
+
+    // Current NVS values pre-fill the portal form so the user can edit
+    // one field without re-typing the others. A non-empty stored
+    // password gives the form a "keep existing" sentinel; otherwise
+    // (brand-new device or prior open-network config) the field starts
+    // empty and whatever the user submits gets saved as-is.
+    let stored_ssid = nvs.wifi_ssid().ok().flatten().unwrap_or_default();
+    let stored_url = nvs.image_url().ok().flatten().unwrap_or_default();
+    let password_is_set = nvs
+        .wifi_password()
+        .ok()
+        .flatten()
+        .is_some_and(|p| !p.is_empty());
 
     // --- Bring up WiFi in AP mode. The AP MAC is stable per-device, so we
     // derive a user-recognisable SSID suffix from its last two bytes. ---
@@ -76,25 +92,135 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     spawner.spawn(net_task(net_runner)).unwrap();
     spawner.spawn(dhcp_server_task(net_stack)).unwrap();
     spawner.spawn(dns_hijack_task(net_stack)).unwrap();
-    spawner.spawn(portal::web_task(net_stack)).unwrap();
+    spawner
+        .spawn(portal::web_task(
+            net_stack,
+            stored_ssid,
+            stored_url,
+            password_is_set,
+        ))
+        .unwrap();
 
-    // --- Panel content: QR + instructions. The QR encodes a WiFi-join URI
-    // so most phones' camera-app scanners offer a one-tap "Join network"
-    // action; the text below it gives the SSID (for manual entry) and the
-    // portal URL as a fallback for users whose phones don't surface the
-    // captive-portal popup automatically. ---
-    let payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
+    // Hand the panel rendering off to its own task — composing the QR
+    // + instructions bitmap and driving the ~20 s e-ink refresh all run
+    // in the background so a fast Save / Refresh press isn't blocked
+    // waiting for them. The software reset at the end of this function
+    // cleanly interrupts the driver mid-update if the user wins the
+    // race; the next boot's own panel reset recovers.
+    spawner
+        .spawn(panel_render_task(spi_bus, epd, tft_enable, ap_ssid))
+        .unwrap();
+
+    // Two exits from config mode:
+    //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
+    //     persist to NVS, reset.
+    //   - the user presses the Refresh button → don't touch NVS, reset
+    //     anyway (next boot lands in normal mode with the existing
+    //     creds).
+    // A failure to write NVS is logged but we reset regardless: either
+    // partial success lands new values for the next boot, or NVS is
+    // still incomplete and we re-enter config mode for a retry. Either
+    // beats silently hanging after the user hit "Save".
+    println!("Config mode ready — awaiting save or Refresh press.");
+    let mut refresh_input = Input::new(
+        gpio_btn_refresh,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let decision = embassy_futures::select::select(
+        portal::SAVE_SIGNAL.wait(),
+        wait_for_press(&mut refresh_input, Duration::from_millis(50)),
+    )
+    .await;
+    match decision {
+        embassy_futures::select::Either::First(creds) => {
+            println!(
+                "Saving config to NVS: ssid={:?}, url={:?}, password={}",
+                creds.ssid,
+                creds.url,
+                if creds.password.is_some() {
+                    "updated"
+                } else {
+                    "unchanged"
+                }
+            );
+            if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
+                println!("WARNING: failed to write wifi.ssid: {:?}", e);
+            }
+            if let Some(pw) = creds.password.as_deref() {
+                if let Err(e) = nvs.set_wifi_password(pw) {
+                    println!("WARNING: failed to write wifi.pass: {:?}", e);
+                }
+            }
+            if let Err(e) = nvs.set_image_url(&creds.url) {
+                println!("WARNING: failed to write image.url: {:?}", e);
+            }
+            // Give the HTTP response a moment to flush before we reboot.
+            Timer::after(Duration::from_millis(500)).await;
+
+        }
+        embassy_futures::select::Either::Second(()) => {
+            println!("Refresh pressed — leaving config mode without saving.");
+        }
+    }
+
+    println!("Rebooting");
+    esp_hal::system::software_reset();
+}
+
+/// Wait for an active-low button to be held for at least `hold_duration`.
+/// Electrical / contact-bounce blips that release before the duration
+/// elapses are filtered out (the wait_for_high race wins and we loop
+/// back to `wait_for_low`). Useful when we've just enabled a pull-up
+/// and the rails are still settling.
+async fn wait_for_press(input: &mut Input<'_>, hold_duration: Duration) {
+    loop {
+        input.wait_for_low().await;
+        match embassy_futures::select::select(
+            Timer::after(hold_duration),
+            input.wait_for_high(),
+        )
+        .await
+        {
+            embassy_futures::select::Either::First(()) => return,
+            embassy_futures::select::Either::Second(()) => continue,
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
+    runner.run().await
+}
+
+/// Render the QR + instructions frame for configuration mode and drive
+/// the e-ink refresh, off the hot path so the save / Refresh race in
+/// `run` isn't blocked for ~20 s waiting for the panel to settle.
+#[embassy_executor::task]
+async fn panel_render_task(
+    mut spi_bus: Spi<'static, esp_hal::Async>,
+    mut epd: EpdPanel,
+    mut tft_enable: Option<Output<'static>>,
+    ap_ssid: String,
+) {
+    let (panel_width, panel_height) = panel::panel_size();
+    // The QR encodes a WiFi-join URI so most phones' camera-app scanners
+    // offer a one-tap "Join network" action; the text below it gives the
+    // SSID (for manual entry) and the portal URL as a fallback for users
+    // whose phones don't surface the captive-portal popup automatically.
+    let qr_payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
     let instructions = format!(
         "reTerminal Setup\n\n\
          Scan the QR code, or\n\
          join WiFi:\n\
          {}\n\n\
          Then open:\n\
-         http://192.168.4.1/",
-        ap_ssid
+         http://192.168.4.1/\n\n\
+         Press the {} to\n\
+         exit without saving.",
+        ap_ssid, portal::REFRESH_BUTTON_LABEL
     );
-    println!("Rendering config screen with QR: {}", payload);
-    let frame = config_image::render(panel_width, panel_height, &payload, &instructions);
+    println!("Rendering config screen with QR: {}", qr_payload);
+    let frame = config_image::render(panel_width, panel_height, &qr_payload, &instructions);
 
     println!("Reset");
     epd.reset(&mut embassy_time::Delay).await.unwrap();
@@ -116,43 +242,10 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     epd.wait_until_idle().await.unwrap();
     println!("Power off");
     epd.power_off(&mut spi_bus).await.unwrap();
-
     if let Some(ref mut tft) = tft_enable {
         tft.set_low();
     }
-
-    // Wait for the portal to hand us a credentials blob, then write it
-    // to NVS and reset. A failure to write is logged but we reset anyway
-    // — on the next boot either the new values land (partial success)
-    // or we re-enter config mode (NVS still incomplete) and the user
-    // retries. Either way, we don't want to be stuck in a black hole
-    // after the user pressed "Save".
-    println!("Config mode ready — awaiting save from the HTTP portal.");
-    let creds = portal::SAVE_SIGNAL.wait().await;
-    println!(
-        "Saving config to NVS: ssid={:?}, url={:?}",
-        creds.ssid, creds.url
-    );
-    if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
-        println!("WARNING: failed to write wifi.ssid: {:?}", e);
-    }
-    if let Err(e) = nvs.set_wifi_password(&creds.password) {
-        println!("WARNING: failed to write wifi.pass: {:?}", e);
-    }
-    if let Err(e) = nvs.set_image_url(&creds.url) {
-        println!("WARNING: failed to write image.url: {:?}", e);
-    }
-
-    // Give the HTTP response a moment to flush before we reboot.
-    Timer::after(Duration::from_millis(500)).await;
-
-    println!("Rebooting to apply new config");
-    esp_hal::system::software_reset();
-}
-
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
-    runner.run().await
+    println!("Config panel render done");
 }
 
 /// Start the WiFi controller in AP mode and keep it alive. `start_async`
