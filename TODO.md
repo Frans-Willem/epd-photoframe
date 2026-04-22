@@ -60,36 +60,6 @@ need it after the image has been fetched. Turn it off as soon as
 between "image in memory" and "deep sleep" and shut down anything we
 don't need.
 
-## Unify networking on the `edge-net` stack
-
-We currently mix unrelated networking crates across both modes:
-
-- Config mode: `leasehund` (DHCP), `edge-captive` (DNS), and — at the
-  time of writing — about to add an HTTP portal.
-- Normal mode: `reqwless` for the image-fetch HTTP client.
-
-The `edge-net` family ships `edge-dhcp` (DHCP server), `edge-captive`
-(DNS — already in use), `edge-http` (server *and* client), and
-`edge-mdns`, all built on the same `edge-nal` abstraction we already
-pull in via `edge-nal-embassy`. Swapping each of the non-edge-net
-crates for its edge-net counterpart would collapse the dep graph onto a
-single networking trait and buffer-pool style.
-
-Concrete migrations to evaluate together:
-
-1. **`leasehund` → `edge-dhcp`** (config-mode DHCP server).
-2. **`picoserve` → `edge-http` server** for the config portal — see the
-   Stage 3c choice made in PLAN.md; if the ergonomics pan out, this is
-   already aligned with the rest of the plan.
-3. **`reqwless` → `edge-http` client** for the normal-flow image fetch.
-   This is the bigger ergonomics hit (we'd lose reqwless's body reader
-   + content-type parsing), so it depends on how painful the config-
-   portal's `edge-http` server code ends up being.
-
-Worth prototyping all three once Stage 3c is stable — if the per-crate
-code size stays reasonable, the dep simplification + consistent error
-types are probably worth it.
-
 ## Re-audit direct dependencies
 
 Some direct `[dependencies]` entries were added for crates that have
@@ -99,13 +69,18 @@ gone, but we still use one `heapless::Vec::new()` call in
 to confirm each direct dep has a real call site that isn't served by a
 re-export we already have in the tree.
 
-For `heapless` specifically: if the only use is the DNS-servers Vec in
-the static AP config, we could build it from an array literal via
-`heapless::Vec::from_slice` or similar helper — but since the type is
-forced on us by embassy-net, getting rid of the direct dep entirely
-would need either embassy-net to re-export `heapless` (unlikely) or us
-to thread that one helper through a different crate. Low priority;
-just document it.
+Specifics to address:
+
+- **`heapless` is mandatory** (embassy-net's `StaticConfigV4.dns_servers`
+  is typed as `heapless::Vec<Ipv4Address, 3>`, and embassy-net doesn't
+  re-export the type).  Dropping it would mean stopping the use of
+  `Config::ipv4_static` entirely, which isn't worth it.
+- **`arrayvec` is redundant.** It's used in exactly two places — the
+  GDEP073E01 and T133A01 drivers each hold a 128-byte
+  `ArrayVec<u8, 128>` scratch buffer for stacking command + data bytes
+  before firing them over SPI. `heapless::Vec<u8, 128>` would do the
+  same job with the crate we're already pulling in. Swap the two uses
+  and drop `arrayvec` from the direct deps list.
 
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 
@@ -124,7 +99,6 @@ tightly coupled. After the Stage 3b audit:
 | embassy-time            | 0.5.0       | 0.5.1         | 0.5.1 requires embassy-executor 0.10 |
 | embassy-net             | 0.8.0       | 0.9.1         | 0.9 requires embassy-time 0.5.1     |
 | smoltcp                 | 0.12        | 0.13          | esp-radio 0.17 pins ^0.12           |
-| leasehund               | 0.3.0       | 0.4.0         | 0.4 requires embassy-net 0.9        |
 | heapless (direct dep)   | 0.8         | 0.9.2         | embassy-net 0.8 uses ^0.8           |
 
 When `esp-hal 1.1.0` ships stable, re-run this audit — a single cascade

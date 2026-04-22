@@ -196,9 +196,9 @@ async fn dhcp_server_task(stack: Stack<'static>) {
     let mut server_options = edge_dhcp::server::ServerOptions::new(ap_ip, Some(&mut gateway_buf));
     server_options.dns = &dns_servers;
 
-    // `edge-dhcp` defaults the pool to .50-.200 of the server's /24; keep
-    // that instead of pinning it here. MAX_CLIENTS=8 matches the old
-    // leasehund setup.
+    // `edge-dhcp` defaults the pool to .50-.200 of the server's /24;
+    // keep that instead of pinning it here. MAX_CLIENTS=8 is generous
+    // for a captive-portal network that usually sees one phone.
     let mut server = edge_dhcp::server::Server::<_, 8>::new(
         || embassy_time::Instant::now().as_secs(),
         ap_ip,
