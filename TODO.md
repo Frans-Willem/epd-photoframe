@@ -11,22 +11,6 @@ palette-index extraction changes. Worth also adding a guard so an
 unexpected bit depth or a non-indexed colour type surfaces as an
 error frame rather than corrupt pixels.
 
-## "Hold Previous+Next" hint belongs on every error frame
-
-The WiFi-failure frames end with "To reconfigure, hold Previous+Next
-for 10 seconds during the next boot." That instruction is equally
-relevant for every other failure `main_normal` can surface — HTTP
-errors, PNG decode failures, OOM, image-dimension mismatch, any
-content-type fallback — but right now it's only spliced into the WiFi
-messages. A user who mistyped the URL gets a bare `HTTP 404: …` with
-no hint about how to fix it.
-
-Fix: push the hint (and any future canonical "what to do next"
-boilerplate) into `error_image::render` itself so every error frame
-carries it regardless of caller. Keep the message-specific part
-caller-supplied. Also consider honouring panel aspect when laying out
-message + hint so the hint stays on-screen on the portrait E1004.
-
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
@@ -45,13 +29,6 @@ need it after the image has been fetched. Turn it off as soon as
 `try_build_frame` returns. More generally: audit what's still powered
 between "image in memory" and "deep sleep" and shut down anything we
 don't need.
-
-## Configurable WiFi credentials and URL
-
-`WIFI_SSID`, `WIFI_PASSWORD`, and `WIFI_URL` are currently baked into the
-binary via `env!`. They should be user-configurable at runtime, most
-likely via a WiFi access-point captive portal (see the Previous+Next
-10-second-hold placeholder in `main.rs`).
 
 ## Unify networking on the `edge-net` stack
 

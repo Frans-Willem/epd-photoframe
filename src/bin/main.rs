@@ -148,18 +148,14 @@ enum NetworkError {
 
 impl NetworkError {
     fn message(&self, ssid: &str) -> String {
-        let hint = "To reconfigure, hold Previous+Next for 10 seconds \
-                    during the next boot.";
         match self {
-            NetworkError::ConnectFailed(e) => format!(
-                "WiFi connect failed: {:?}\nSSID: {}\n\n{}",
-                e, ssid, hint
-            ),
+            NetworkError::ConnectFailed(e) => {
+                format!("WiFi connect failed: {:?}\nSSID: {}", e, ssid)
+            }
             NetworkError::Timeout(d) => format!(
-                "WiFi connect timed out after {} s.\nSSID: {}\n\n{}",
+                "WiFi connect timed out after {} s.\nSSID: {}",
                 d.as_secs(),
                 ssid,
-                hint
             ),
         }
     }
