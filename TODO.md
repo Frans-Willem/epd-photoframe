@@ -278,6 +278,23 @@ Swap once there's a pain point the hand-rolled helpers can't
 handle cleanly — right now they fit every URL the server has
 thrown at us.
 
+## Drop `crc` crate for `esp_hal::rom::crc`
+
+`src/rtc_persisted.rs` uses `crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC)`
+for the torn-write / bit-rot guard over persisted RTC payloads. esp-hal
+re-exports ROM CRC helpers at `esp_hal::rom::crc::*` (via
+`esp-rom-sys`) — the `crc32_le` variant matches the
+CRC-32/ISO-HDLC polynomial + init + final XOR, so it's a drop-in
+replacement. esp-nvs already uses it the same way
+(`esp_hal::rom::crc::crc32_le(init, data)` in `platform.rs`).
+
+Win: one fewer `[dependencies]` entry and a few hundred bytes off
+the image (the `crc` crate computes the table at build time but
+still carries it in flash).
+
+Confirm the polynomial/init/final match before swapping — run both
+against a known vector once and compare.
+
 ## Re-audit direct dependencies
 
 Some direct `[dependencies]` entries were added for crates that have
