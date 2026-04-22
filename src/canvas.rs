@@ -19,8 +19,7 @@ pub struct Canvas {
 impl Canvas {
     /// Allocate a `width × height` canvas filled with white.
     pub fn new(width: u32, height: u32) -> Self {
-        let pixels =
-            alloc::vec![Spectra6Color::White; (width as usize) * (height as usize)];
+        let pixels = alloc::vec![Spectra6Color::White; (width as usize) * (height as usize)];
         Self {
             pixels,
             width,

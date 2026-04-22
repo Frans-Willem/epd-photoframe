@@ -1,5 +1,5 @@
+use crate::iter_util::ChunksHeaplessExt;
 use crate::spectra6::{Spectra6Color, SpectraPacker};
-use arrayvec::ArrayVec;
 use core::marker::PhantomData;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::delay::DelayNs;
@@ -226,20 +226,8 @@ where
                 spi.write(&[val]).await.map_err(T133A01Error::SPIError)?;
             }
         } else {
-            let mut buffer = ArrayVec::<u8, 128>::new();
-            for v in data.into_iter() {
-                if buffer.is_full() {
-                    spi.write(buffer.as_slice())
-                        .await
-                        .map_err(T133A01Error::SPIError)?;
-                    buffer.clear();
-                }
-                buffer.push(v);
-            }
-            if !buffer.is_empty() {
-                spi.write(buffer.as_slice())
-                    .await
-                    .map_err(T133A01Error::SPIError)?;
+            for chunk in data.into_iter().chunks_heapless::<128>() {
+                spi.write(&chunk).await.map_err(T133A01Error::SPIError)?;
             }
         }
         // Deassert chip select, pull high

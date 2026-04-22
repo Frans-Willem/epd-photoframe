@@ -35,8 +35,8 @@ pub fn render(width: usize, height: usize, message: &str) -> Vec<Spectra6Color> 
         s
     };
     let wrapped = hard_wrap(&full, max_chars);
-    let _ = Text::with_baseline(&wrapped, Point::new(10, 10), style, Baseline::Top)
-        .draw(&mut canvas);
+    let _ =
+        Text::with_baseline(&wrapped, Point::new(10, 10), style, Baseline::Top).draw(&mut canvas);
     canvas.into_vec()
 }
 

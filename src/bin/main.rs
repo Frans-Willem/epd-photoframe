@@ -296,9 +296,18 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         &mut dyn esp_hal::gpio::RtcPin,
         esp_hal::rtc_cntl::sleep::WakeupLevel,
     )] = &mut [
-        (&mut gpio_btn_refresh, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_btn_previous, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
-        (&mut gpio_btn_next, esp_hal::rtc_cntl::sleep::WakeupLevel::Low),
+        (
+            &mut gpio_btn_refresh,
+            esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
+        ),
+        (
+            &mut gpio_btn_previous,
+            esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
+        ),
+        (
+            &mut gpio_btn_next,
+            esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
+        ),
     ];
     let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
 
@@ -446,10 +455,7 @@ async fn try_build_frame<'t>(
         true,
         edge_http::Method::Get,
         path,
-        &[
-            ("Host", host_header.as_str()),
-            ("Connection", "close"),
-        ],
+        &[("Host", host_header.as_str()), ("Connection", "close")],
     )
     .await
     .map_err(|e| format!("HTTP request: {:?}", e))?;
@@ -465,7 +471,10 @@ async fn try_build_frame<'t>(
         let headers = conn
             .headers()
             .map_err(|e| format!("HTTP headers: {:?}", e))?;
-        (headers.code, headers.headers.content_type().map(String::from))
+        (
+            headers.code,
+            headers.headers.content_type().map(String::from),
+        )
     };
 
     println!("Reading body");
@@ -525,16 +534,15 @@ async fn try_build_frame<'t>(
     }
 
     println!("Decode PNG");
-    let header = minipng::decode_png_header(&body)
-        .map_err(|e| format!("PNG header: {:?}", e))?;
+    let header = minipng::decode_png_header(&body).map_err(|e| format!("PNG header: {:?}", e))?;
     let required = header.required_bytes();
     let mut decode_buf: Vec<u8> = Vec::new();
     decode_buf
         .try_reserve_exact(required)
         .map_err(|e| format!("OOM decode buffer ({} bytes): {:?}", required, e))?;
     decode_buf.resize(required, 0);
-    let image = minipng::decode_png(&body, &mut decode_buf)
-        .map_err(|e| format!("PNG decode: {:?}", e))?;
+    let image =
+        minipng::decode_png(&body, &mut decode_buf).map_err(|e| format!("PNG decode: {:?}", e))?;
     println!("Decoded PNG");
     println!(
         "Image: {}x{} {:?} {:?}",
@@ -593,9 +601,12 @@ async fn try_build_frame<'t>(
             bytes_per_row, min_bytes_per_row, panel_width, bit_depth
         ));
     }
-    let expected_len = bytes_per_row
-        .checked_mul(panel_height)
-        .ok_or_else(|| format!("Image dimensions overflow: {} x {}", bytes_per_row, panel_height))?;
+    let expected_len = bytes_per_row.checked_mul(panel_height).ok_or_else(|| {
+        format!(
+            "Image dimensions overflow: {} x {}",
+            bytes_per_row, panel_height
+        )
+    })?;
     if pixels.len() < expected_len {
         return Err(format!(
             "PNG pixel buffer too small: {} bytes, expected at least {} \
@@ -685,12 +696,8 @@ async fn main(spawner: Spawner) -> ! {
     let previous_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_previous.number())) != 0;
     let next_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_next.number())) != 0;
 
-    let wake_action = determine_wake_action(
-        wake_reason,
-        refresh_latched,
-        previous_latched,
-        next_latched,
-    );
+    let wake_action =
+        determine_wake_action(wake_reason, refresh_latched, previous_latched, next_latched);
 
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
     let time_since_boot = rtc.time_since_boot();

@@ -199,10 +199,8 @@ async fn dhcp_server_task(stack: Stack<'static>) {
     // `edge-dhcp` defaults the pool to .50-.200 of the server's /24;
     // keep that instead of pinning it here. MAX_CLIENTS=8 is generous
     // for a captive-portal network that usually sees one phone.
-    let mut server = edge_dhcp::server::Server::<_, 8>::new(
-        || embassy_time::Instant::now().as_secs(),
-        ap_ip,
-    );
+    let mut server =
+        edge_dhcp::server::Server::<_, 8>::new(|| embassy_time::Instant::now().as_secs(), ap_ip);
 
     let mut buf = [0u8; 1500];
     loop {
@@ -211,8 +209,13 @@ async fn dhcp_server_task(stack: Stack<'static>) {
             .await
         {
             Ok(mut socket) => {
-                match edge_dhcp::io::server::run(&mut server, &server_options, &mut socket, &mut buf)
-                    .await
+                match edge_dhcp::io::server::run(
+                    &mut server,
+                    &server_options,
+                    &mut socket,
+                    &mut buf,
+                )
+                .await
                 {
                     Ok(()) => println!("DHCP server returned Ok; restarting"),
                     Err(e) => println!("DHCP server error ({:?}); restarting", e),
@@ -232,8 +235,7 @@ async fn dns_hijack_task(stack: Stack<'static>) {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let ap_ip = Ipv4Addr::new(192, 168, 4, 1);
-    let buffers: edge_nal_embassy::UdpBuffers<1, 512, 512, 2> =
-        edge_nal_embassy::UdpBuffers::new();
+    let buffers: edge_nal_embassy::UdpBuffers<1, 512, 512, 2> = edge_nal_embassy::UdpBuffers::new();
     let udp = edge_nal_embassy::Udp::new(stack, &buffers);
     let mut tx = [0u8; 512];
     let mut rx = [0u8; 512];

@@ -1,5 +1,5 @@
+use crate::iter_util::ChunksHeaplessExt;
 use crate::spectra6::{Spectra6Color, SpectraPacker};
-use arrayvec::ArrayVec;
 use core::marker::PhantomData;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::delay::DelayNs;
@@ -127,9 +127,7 @@ where
         Ok(())
     }
 
-    pub async fn wait_until_idle(
-        &mut self,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+    pub async fn wait_until_idle(&mut self) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
         // BUSY is low while the panel is busy, high when idle.
         self.busy
             .wait_for_high()
@@ -149,20 +147,8 @@ where
             .await
             .map_err(Gdep073e01Error::SPIError)?;
         self.dc.set_high().map_err(Gdep073e01Error::DCError)?;
-        let mut buffer = ArrayVec::<u8, 128>::new();
-        for v in data {
-            if buffer.is_full() {
-                spi.write(buffer.as_slice())
-                    .await
-                    .map_err(Gdep073e01Error::SPIError)?;
-                buffer.clear();
-            }
-            buffer.push(v);
-        }
-        if !buffer.is_empty() {
-            spi.write(buffer.as_slice())
-                .await
-                .map_err(Gdep073e01Error::SPIError)?;
+        for chunk in data.into_iter().chunks_heapless::<128>() {
+            spi.write(&chunk).await.map_err(Gdep073e01Error::SPIError)?;
         }
         self.cs.set_high().map_err(Gdep073e01Error::CSError)?;
         Ok(())
@@ -176,7 +162,8 @@ where
         self.command(spi, Command::CMDH, [0x49, 0x55, 0x20, 0x08, 0x09, 0x18])
             .await?;
         self.command(spi, Command::PowerSetting, [0x3F]).await?;
-        self.command(spi, Command::PanelSetting, [0x5F, 0x69]).await?;
+        self.command(spi, Command::PanelSetting, [0x5F, 0x69])
+            .await?;
         self.command(spi, Command::POFS, [0x00, 0x54, 0x00, 0x44])
             .await?;
         self.command(spi, Command::BoosterSoftStart1, [0x40, 0x1F, 0x1F, 0x2C])

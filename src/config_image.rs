@@ -43,13 +43,8 @@ pub fn render(
     {
         let mut sub = canvas.cropped(&text_area);
         let style = MonoTextStyle::new(&FONT_10X20, Spectra6Color::Black);
-        let _ = Text::with_baseline(
-            instructions,
-            Point::new(16, 16),
-            style,
-            Baseline::Top,
-        )
-        .draw(&mut sub);
+        let _ = Text::with_baseline(instructions, Point::new(16, 16), style, Baseline::Top)
+            .draw(&mut sub);
     }
 
     canvas.into_vec()

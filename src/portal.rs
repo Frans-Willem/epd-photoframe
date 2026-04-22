@@ -76,10 +76,7 @@ impl Handler for PortalHandler {
         // connection for body reading / response writing.
         let (method, content_len) = {
             let req = conn.headers()?;
-            (
-                req.method,
-                req.headers.content_len().unwrap_or(0) as usize,
-            )
+            (req.method, req.headers.content_len().unwrap_or(0) as usize)
         };
 
         if method == Method::Post {

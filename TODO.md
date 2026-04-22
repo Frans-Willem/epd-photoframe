@@ -75,12 +75,6 @@ Specifics to address:
   is typed as `heapless::Vec<Ipv4Address, 3>`, and embassy-net doesn't
   re-export the type).  Dropping it would mean stopping the use of
   `Config::ipv4_static` entirely, which isn't worth it.
-- **`arrayvec` is redundant.** It's used in exactly two places — the
-  GDEP073E01 and T133A01 drivers each hold a 128-byte
-  `ArrayVec<u8, 128>` scratch buffer for stacking command + data bytes
-  before firing them over SPI. `heapless::Vec<u8, 128>` would do the
-  same job with the crate we're already pulling in. Swap the two uses
-  and drop `arrayvec` from the direct deps list.
 
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 
