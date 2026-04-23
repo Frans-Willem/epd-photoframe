@@ -78,6 +78,27 @@ that don't fit a line on their own. The wrapped string then feeds
 `embedded_graphics::Text::with_baseline` the same way today. Both
 call sites can share the wrapper since they both use `FONT_10X20`.
 
+## Investigate slow DHCP acquisition on each wake
+
+Wake-to-`wait_config_up` seems to take a suspicious fraction of our
+active budget — worth measuring precisely and root-causing. Leading
+hypothesis: we start the `embassy-net` stack (which sends its first
+`DHCPDISCOVER` immediately) before the WiFi driver has associated
+and the link is actually up. That first discover gets dropped on
+the floor, and the embassy-net DHCP client's retry backoff is a few
+seconds, so we pay it on every cycle.
+
+Things to try:
+- Log timestamps at `wait_link_up().await` returning and
+  `wait_config_up().await` returning, to separate association time
+  from DHCP acquisition time.
+- If association is fast but DHCP is slow, gate the call to
+  `embassy_net::new` (or hold the runner task) until link-up, so
+  embassy-net's first discover goes out on a working link.
+- Also captures the "DHCP lease in RTC" TODO below — persisting the
+  lease skips the discover/request round-trip entirely on a matching
+  network.
+
 ## Persist DHCP lease in RTC memory
 
 The RTC-persisted storage scaffolding (`src/rtc_persisted.rs`) is
@@ -310,6 +331,23 @@ Specifics to address:
   is typed as `heapless::Vec<Ipv4Address, 3>`, and embassy-net doesn't
   re-export the type).  Dropping it would mean stopping the use of
   `Config::ipv4_static` entirely, which isn't worth it.
+
+## Drop `[patch.crates-io]` pins once upstream releases land
+
+`Cargo.toml` currently patches two crates against upstream git commits
+because the fixes we need are merged but not yet released:
+
+- **`esp-nvs`** — pinned to `lhemala/esp-nvs` rev
+  `e371b050…` (PR #24, loosens the `esp-hal = "1.0.0"` requirement so
+  Cargo's pre-release rule accepts 1.1.0-rc.0). Drop when a post-0.4.0
+  release ships.
+- **`edge-nal`, `edge-nal-embassy`, `edge-http`, `edge-dhcp`,
+  `edge-captive`** — all pinned to `ivmarkov/edge-net` master rev
+  `1f084b41…` (PR #90, bumps to embassy-net 0.9 / heapless 0.9). Drop
+  when a tagged release crossing that commit ships.
+
+Check each on crates.io when doing the next `esp-hal` cascade upgrade
+and remove whichever pins have been released out from under them.
 
 ## Dependency upgrade cascade blocked on `esp-hal 1.1.0-rc → 1.1.0`
 

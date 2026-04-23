@@ -1,8 +1,7 @@
-//! `'static` storage for the embassy-net `StackResources` and the
-//! `esp-radio` `Controller`. Both `main_normal` and `config_mode::run`
-//! reach into these directly; only one mode runs per boot, so a single
-//! instance of each static is enough and the other mode's reference
-//! simply never executes.
+//! `'static` storage for the embassy-net `StackResources`. Both
+//! `main_normal` and `config_mode::run` reach into it directly; only
+//! one mode runs per boot, so a single instance is enough and the
+//! other mode's reference simply never executes.
 //!
 //! `StackResources` is sized for the worst case (config mode: 1 DHCP
 //! server + 1 DNS hijack + 1 HTTP listener + the HTTP handler-task
@@ -18,6 +17,3 @@ pub const NUM_SOCKETS: usize = 10;
 pub static NETWORK_RESOURCES: static_cell::ConstStaticCell<
     embassy_net::StackResources<NUM_SOCKETS>,
 > = static_cell::ConstStaticCell::new(embassy_net::StackResources::new());
-
-pub static RADIO_CONTROLLER: static_cell::StaticCell<esp_radio::Controller> =
-    static_cell::StaticCell::new();

@@ -18,7 +18,7 @@ use esp_println::println;
 use crate::config::Config;
 use crate::config_image;
 use crate::hardware::{EpdPanel, HardwareCtx};
-use crate::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
+use crate::net_resources::NETWORK_RESOURCES;
 
 mod portal;
 
@@ -52,24 +52,29 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
         .is_some_and(|p| !p.is_empty());
 
     // --- Bring up WiFi in AP mode. The AP MAC is stable per-device, so we
-    // derive a user-recognisable SSID suffix from its last two bytes. ---
-    let radio_init = RADIO_CONTROLLER
-        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(radio_init, wifi, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-    let ap_device = interfaces.ap;
-
-    let ap_mac = esp_radio::wifi::ap_mac();
-    let ap_ssid = format!("reTerminal-setup-{:02X}{:02X}", ap_mac[4], ap_mac[5]);
+    // derive a user-recognisable SSID suffix from its last two bytes.
+    // Constructing the controller with `initial_config` configures and
+    // starts the radio; dropping it stops it. ---
+    let ap_mac = esp_hal::efuse::interface_mac_address(
+        esp_hal::efuse::InterfaceMacAddress::AccessPoint,
+    );
+    let ap_mac_bytes = ap_mac.as_bytes();
+    let ap_ssid = format!(
+        "reTerminal-setup-{:02X}{:02X}",
+        ap_mac_bytes[4], ap_mac_bytes[5]
+    );
     println!("AP SSID: {}", ap_ssid);
 
-    let ap_mode_config = esp_radio::wifi::ModeConfig::AccessPoint(
-        esp_radio::wifi::AccessPointConfig::default()
-            .with_ssid(ap_ssid.clone())
-            .with_auth_method(esp_radio::wifi::AuthMethod::None),
+    let ap_mode_config = esp_radio::wifi::Config::AccessPoint(
+        esp_radio::wifi::ap::AccessPointConfig::default()
+            .with_ssid(ap_ssid.as_str())
+            .with_auth_method(esp_radio::wifi::AuthenticationMethod::None),
     );
-    wifi_controller.set_config(&ap_mode_config).unwrap();
+    let controller_config =
+        esp_radio::wifi::ControllerConfig::default().with_initial_config(ap_mode_config);
+    let (wifi_controller, interfaces) = esp_radio::wifi::new(wifi, controller_config)
+        .expect("Failed to initialize Wi-Fi controller");
+    let ap_device = interfaces.access_point;
 
     // --- Static embassy-net stack on the AP interface. 192.168.4.1/24 is
     // the ESP-IDF softap convention; keeping it here means the portal URL
@@ -89,18 +94,13 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     let (net_stack, net_runner) =
         embassy_net::new(ap_device, net_config, NETWORK_RESOURCES.take(), seed);
 
-    spawner.spawn(ap_wifi_task(wifi_controller)).unwrap();
-    spawner.spawn(net_task(net_runner)).unwrap();
-    spawner.spawn(dhcp_server_task(net_stack)).unwrap();
-    spawner.spawn(dns_hijack_task(net_stack)).unwrap();
-    spawner
-        .spawn(portal::web_task(
-            net_stack,
-            stored_ssid,
-            stored_url,
-            password_is_set,
-        ))
-        .unwrap();
+    spawner.spawn(ap_wifi_task(wifi_controller).unwrap());
+    spawner.spawn(net_task(net_runner).unwrap());
+    spawner.spawn(dhcp_server_task(net_stack).unwrap());
+    spawner.spawn(dns_hijack_task(net_stack).unwrap());
+    spawner.spawn(
+        portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap(),
+    );
 
     // Hand the panel rendering off to its own task — composing the QR
     // + instructions bitmap and driving the ~20 s e-ink refresh all run
@@ -108,9 +108,7 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // waiting for them. The software reset at the end of this function
     // cleanly interrupts the driver mid-update if the user wins the
     // race; the next boot's own panel reset recovers.
-    spawner
-        .spawn(panel_render_task(spi_bus, epd, tft_enable, ap_ssid))
-        .unwrap();
+    spawner.spawn(panel_render_task(spi_bus, epd, tft_enable, ap_ssid).unwrap());
 
     // Two exits from config mode:
     //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
@@ -189,7 +187,7 @@ async fn wait_for_press(input: &mut Input<'_>, hold_duration: Duration) {
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
+async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>) {
     runner.run().await
 }
 
@@ -249,22 +247,26 @@ async fn panel_render_task(
     println!("Config panel render done");
 }
 
-/// Start the WiFi controller in AP mode and keep it alive. `start_async`
-/// internally waits for `WifiEvent::ApStart`, so by the time it returns
-/// the AP is advertising and accepting associations. The controller must
-/// not be dropped while we want the AP to stay up, hence the idle loop.
+/// Keep the WiFi controller alive and log association events. The
+/// controller must outlive the lifetime of the AP, hence the idle loop
+/// that holds onto it.
 #[embassy_executor::task]
-async fn ap_wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
-    println!("Starting WiFi in AP mode");
-    controller.start_async().await.unwrap();
+async fn ap_wifi_task(controller: esp_radio::wifi::WifiController<'static>) {
     println!("AP started");
     loop {
         // Log association events as they come in; they're useful for
         // verifying a phone actually joined the portal network.
-        controller
-            .wait_for_event(esp_radio::wifi::WifiEvent::ApStaConnected)
-            .await;
-        println!("AP: station connected");
+        match controller.wait_for_access_point_connected_event_async().await {
+            Ok(esp_radio::wifi::AccessPointStationEventInfo::Connected(info)) => {
+                println!("AP: station connected: {:?}", info);
+            }
+            Ok(esp_radio::wifi::AccessPointStationEventInfo::Disconnected(info)) => {
+                println!("AP: station disconnected: {:?}", info);
+            }
+            Err(e) => {
+                println!("AP: event-wait error: {:?}", e);
+            }
+        }
     }
 }
 

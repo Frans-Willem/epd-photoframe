@@ -260,22 +260,21 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let (panel_width, panel_height) = panel::panel_size();
 
     // --- WiFi bring-up (runs in parallel with any ongoing white pre-flash
-    // that `main` started before the config-mode race). ---
-    let radio_init = RADIO_CONTROLLER
-        .init(esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller"));
-    let (mut wifi_controller, interfaces) =
-        esp_radio::wifi::new(radio_init, wifi, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
-
-    let wifi_sta_device = interfaces.sta;
-    let sta_config = embassy_net::Config::dhcpv4(Default::default());
-
-    let station_config = esp_radio::wifi::ModeConfig::Client(
-        esp_radio::wifi::ClientConfig::default()
-            .with_ssid(creds.ssid.as_str().into())
+    // that `main` started before the config-mode race). Constructing the
+    // controller with `initial_config` starts the radio; dropping it
+    // stops it. ---
+    let station_config = esp_radio::wifi::Config::Station(
+        esp_radio::wifi::sta::StationConfig::default()
+            .with_ssid(creds.ssid.as_str())
             .with_password(creds.password.as_str().into()),
     );
-    wifi_controller.set_config(&station_config).unwrap();
+    let controller_config =
+        esp_radio::wifi::ControllerConfig::default().with_initial_config(station_config);
+    let (wifi_controller, interfaces) = esp_radio::wifi::new(wifi, controller_config)
+        .expect("Failed to initialize Wi-Fi controller");
+
+    let wifi_sta_device = interfaces.station;
+    let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
     let rng = esp_hal::rng::Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
@@ -283,8 +282,8 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let (net_stack, net_runner) =
         embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
 
-    spawner.spawn(wifi_task(wifi_controller)).unwrap();
-    spawner.spawn(net_task(net_runner)).unwrap();
+    spawner.spawn(wifi_task(wifi_controller).unwrap());
+    spawner.spawn(net_task(net_runner).unwrap());
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
@@ -325,7 +324,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     };
     match heapless::String::<STORED_URL_MAX>::try_from(current_url.as_str()) {
         Ok(s) => CURRENT_URL.set(s),
-        Err(()) => {
+        Err(heapless::CapacityError { .. }) => {
             println!(
                 "Current URL too long ({} bytes) to persist in RTC; NVS fallback after next cold boot",
                 current_url.len()
@@ -370,7 +369,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                             println!("Stashing redirect URL for next Timer wake: {}", abs);
                             REDIRECT_URL.set(stored);
                         }
-                        Err(()) => {
+                        Err(heapless::CapacityError { .. }) => {
                             println!(
                                 "Redirect URL too long ({} bytes); dropping",
                                 abs.len()
@@ -459,14 +458,10 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // Convert the absolute wake-up `Instant` back into a relative
     // duration as late as possible, so any time still spent below
     // (UART flush etc.) doesn't inflate it. `sleep_deep` takes a
-    // `core::time::Duration`, so we bridge through micros.
-    //
-    // Note: the actual sleep duration can still drift by a few percent
-    // relative to what we pass here — esp-hal 1.0's
-    // `TimerWakeupSource::apply` uses the nominal 150 kHz for the
-    // conversion and ignores the calibration it already performed at
-    // boot. Fixed upstream in esp-hal 1.1.0 (picked up once the rest
-    // of the dependency cascade lands).
+    // `core::time::Duration`, so we bridge through micros. Expect a
+    // residual drift on the order of a second over hours-scale sleeps:
+    // the RTC-slow clock is the internal 150 kHz RC oscillator, and
+    // even with esp-hal's calibration its accuracy is bounded.
     let remaining = wakeup_requested.saturating_duration_since(embassy_time::Instant::now());
     let sleep_duration = core::time::Duration::from_micros(remaining.as_micros());
     println!("Deep sleep for {:?}", sleep_duration);
@@ -488,7 +483,7 @@ async fn blink_task(mut led: Output<'static>) {
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::WifiDevice<'static>>) {
+async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>) {
     runner.run().await
 }
 
@@ -506,20 +501,13 @@ static WIFI_CONNECT_FAILURE: embassy_sync::signal::Signal<
 #[embassy_executor::task]
 async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     println!("Start connection task");
-    println!("Device capabilities: {:?}", controller.capabilities());
-
-    println!("Starting WiFi");
-    controller.start_async().await.unwrap();
-    println!("Wifi started");
     loop {
         println!("Connecting WiFi");
         match controller.connect_async().await {
             Ok(_) => {
                 println!("Connected");
-                controller
-                    .wait_for_event(esp_radio::wifi::WifiEvent::StaDisconnected)
-                    .await;
-                println!("Disconnected");
+                let info = controller.wait_for_disconnect_async().await.ok();
+                println!("Disconnected: {:?}", info);
             }
             Err(e) => {
                 println!("Failed to connect to wifi: {e:?}");
@@ -531,7 +519,7 @@ async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
     }
 }
 
-use reterminal_e100x::net_resources::{NETWORK_RESOURCES, RADIO_CONTROLLER};
+use reterminal_e100x::net_resources::NETWORK_RESOURCES;
 
 use embedded_io_async::Read;
 
@@ -932,7 +920,7 @@ async fn main(spawner: Spawner) -> ! {
         determine_wake_action(wake_reason, refresh_latched, previous_latched, next_latched);
 
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
-    let time_since_boot = rtc.time_since_boot();
+    let time_since_boot = rtc.time_since_power_up();
     println!(
         "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
          latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
@@ -943,7 +931,14 @@ async fn main(spawner: Spawner) -> ! {
     println!("RTC REDIRECT_URL: {:?}", REDIRECT_URL.get().as_deref());
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
-    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
+    esp_alloc::psram_allocator!(
+        peripherals.PSRAM,
+        esp_hal::psram,
+        esp_hal::psram::PsramConfig {
+            mode: esp_hal::psram::PsramMode::OctalSpi,
+            ..Default::default()
+        }
+    );
 
     // Load runtime configuration from NVS. A fresh / blank partition is
     // not an error (esp-nvs treats all-0xFF as "no entries yet"), so the
@@ -978,15 +973,18 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    let sw_ints =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
 
-    spawner
-        .spawn(blink_task(Output::new(
+    spawner.spawn(
+        blink_task(Output::new(
             peripherals.GPIO6,
             Level::Low,
             OutputConfig::default(),
-        )))
-        .unwrap();
+        ))
+        .unwrap(),
+    );
 
     // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
     let epd_spi_bus = Spi::new(

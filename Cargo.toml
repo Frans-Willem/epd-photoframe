@@ -14,33 +14,45 @@ e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
 e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
 
 [dependencies]
-esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable", "psram"] }
+# esp-hal 1.1.0-rc.0 (not stable yet) is deliberately picked here:
+# it's the first release where `TimerWakeupSource::apply` converts the
+# requested sleep duration using the calibrated slow-clock period (via
+# `clock::us_to_rtc_ticks`) instead of the nominal 150 kHz, which
+# drops deep-sleep timing error from ±5 % to well under 1 %. That's
+# load-bearing for the 24 h refresh target — see the "Calibrated
+# sleep duration" TODO entry.
+#
+# This drags the rest of the esp-* / embassy stack up a notch each
+# (esp-rtos 0.3, esp-radio 0.18, embassy-executor 0.10, embassy-net
+# 0.9, smoltcp 0.13, heapless 0.9, …) because they all require
+# esp-hal ~1.1.0-rc.0. Revisit once esp-hal 1.1.0 lands stable and
+# flip everything off the rc.
+esp-hal = { version = "1.1.0-rc.0", features = ["esp32s3", "unstable"] }
 
-esp-rtos = { version = "0.2.0", features = [
+esp-rtos = { version = "0.3.0", features = [
   "embassy",
   "esp-alloc",
   "esp-radio",
   "esp32s3",
 ] }
 
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 
-embassy-net = { version = "0.8.0", features = ["dhcpv4", "dns", "mdns", "medium-ethernet", "tcp", "udp"], default-features = false }
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "dns", "mdns", "medium-ethernet", "tcp", "udp"], default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
-esp-alloc = "0.9.0"
+esp-alloc = "0.10.0"
 # for more networking protocol support see https://crates.io/crates/edge-net
-embassy-executor = { version = "0.9.1", features = [] }
+embassy-executor = { version = "0.10.0", features = [] }
 embassy-futures = "0.1.2"
-embassy-time = "0.5.0"
-esp-radio = { version = "0.17.0", features = [
+embassy-time = "0.5.1"
+esp-radio = { version = "0.18.0", features = [
   "esp-alloc",
   "esp32s3",
-  "smoltcp",
   "unstable",
   "wifi",
 ] }
-smoltcp = { version = "0.12.0", default-features = false, features = [
+smoltcp = { version = "0.13.0", default-features = false, features = [
   "medium-ethernet",
   "multicast",
   "proto-dhcpv4",
@@ -61,17 +73,38 @@ embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-graphics = "0.8.2"
 minipng = "1.0.0"
-esp-storage = { version = "0.8.1", features = ["esp32s3"] }
+esp-storage = { version = "0.9.0", features = ["esp32s3"] }
 esp-nvs = { version = "0.4.0", features = ["esp32s3"] }
 qrcodegen-no-heap = "1.8.1"
 edge-dhcp = { version = "0.7.0", default-features = false, features = ["io"] }
-heapless = { version = "0.8", default-features = false }
+heapless = { version = "0.9", default-features = false }
 crc = { version = "3.3.0", default-features = false }
 edge-captive = { version = "0.7.0", default-features = false, features = ["io"] }
 edge-http = { version = "0.7.0", default-features = false, features = ["io"] }
-embassy-sync = { version = "0.7", default-features = false }
+embassy-sync = { version = "0.8", default-features = false }
 edge-nal = "0.6"
 edge-nal-embassy = { version = "0.8.1", default-features = false, features = ["tcp", "udp", "proto-ipv4"] }
+
+# Pull `esp-nvs` from the upstream PR that relaxes its `esp-hal`
+# version requirement to accept 1.1.0-rc.0 (and beyond). The released
+# 0.4.0 still pins `esp-hal = "1.0.0"`, which Cargo's pre-release rules
+# exclude from matching 1.1.0-rc.0. Drop this `[patch]` once the PR is
+# merged and a new esp-nvs release ships.
+# https://github.com/lhemala/esp-nvs/pull/24
+#
+# And the edge-* crates: the `embassy-net 0.9 / heapless 0.9` bump is
+# on master (PR ivmarkov/edge-net#90, merged) but hasn't been
+# released. Without this pin, `edge-nal-embassy 0.8.1` would drag in
+# `embassy-net 0.8` (pinned to `heapless 0.8`), conflicting with
+# `esp-radio 0.18`'s `heapless 0.9` requirement. Drop once a release
+# tagging master ships.
+[patch.crates-io]
+esp-nvs = { git = "https://github.com/lhemala/esp-nvs", rev = "e371b0502a83336f649c996006941ba05d9b6308" }
+edge-nal = { git = "https://github.com/ivmarkov/edge-net", rev = "1f084b41944c35b233cbe17accfbc09a56d5eaf0" }
+edge-nal-embassy = { git = "https://github.com/ivmarkov/edge-net", rev = "1f084b41944c35b233cbe17accfbc09a56d5eaf0" }
+edge-http = { git = "https://github.com/ivmarkov/edge-net", rev = "1f084b41944c35b233cbe17accfbc09a56d5eaf0" }
+edge-dhcp = { git = "https://github.com/ivmarkov/edge-net", rev = "1f084b41944c35b233cbe17accfbc09a56d5eaf0" }
+edge-captive = { git = "https://github.com/ivmarkov/edge-net", rev = "1f084b41944c35b233cbe17accfbc09a56d5eaf0" }
 
 [profile.dev]
 # Rust debug is too slow.
