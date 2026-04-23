@@ -9,10 +9,9 @@
 //! 1. **Magic marker** written *after* the payload + checksum. A reset
 //!    that interrupts `set()` leaves `magic == 0` (cold-boot state),
 //!    and the next `take()` sees "nothing stored."
-//! 2. **CRC-32 checksum** (ISO-HDLC polynomial, `crc` crate) over the
-//!    payload bytes. Catches the case where the magic slipped through
-//!    but the payload was torn, plus any bit-rot during the RTC-SLOW
-//!    domain's lower-power retention.
+//! 2. **CRC-32 checksum** over the payload bytes. Catches the case
+//!    where the magic slipped through but the payload was torn, plus
+//!    any bit-rot during the RTC-SLOW domain's lower-power retention.
 //!
 //! `RtcPersisted<T>` exposes `take`/`set`/`clear` through `&self` via
 //! interior mutability — callers reference the static directly, no
@@ -145,14 +144,13 @@ impl<T> Default for RtcPersisted<T> {
     }
 }
 
-/// CRC-32 of the raw bytes of a `MaybeUninit<T>`. Safe to read as
+/// Checksum of the raw bytes of a `MaybeUninit<T>`. Safe to read as
 /// `u8` regardless of init state — all bit patterns are valid `u8`s.
 fn checksum<T>(p: &MaybeUninit<T>) -> u32 {
-    const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
     // SAFETY: `p.as_ptr()` is a valid pointer into owned storage of
     // length `size_of::<T>()`; reading as `u8` is always valid.
     let bytes =
         unsafe { core::slice::from_raw_parts(p.as_ptr().cast::<u8>(), core::mem::size_of::<T>()) };
-    CRC.checksum(bytes)
+    esp_hal::rom::crc::crc32_le(0, bytes)
 }
 
