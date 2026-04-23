@@ -192,52 +192,6 @@ const DEFAULT_SUCCESS_SLEEP: embassy_time::Duration = embassy_time::Duration::fr
 /// wake without the user having to push a button.
 const DEFAULT_ERROR_SLEEP: embassy_time::Duration = embassy_time::Duration::from_secs(600);
 
-enum NetworkError {
-    ConnectFailed(esp_radio::wifi::WifiError),
-    Timeout(Duration),
-}
-
-impl NetworkError {
-    fn message(&self, ssid: &str) -> String {
-        match self {
-            NetworkError::ConnectFailed(e) => {
-                format!("WiFi connect failed: {:?}\nSSID: {}", e, ssid)
-            }
-            NetworkError::Timeout(d) => format!(
-                "WiFi connect timed out after {} s.\nSSID: {}",
-                d.as_secs(),
-                ssid,
-            ),
-        }
-    }
-}
-
-/// Wait for the network to get DHCP'd, with both a hard deadline and
-/// an early bail-out if `wifi_task` reports a connect failure (wrong
-/// password, SSID missing, etc.). Without the race, a bad SSID/password
-/// leaves the device hanging forever on `wait_link_up` while the retry
-/// loop cycles silently.
-async fn wait_for_network_ready(
-    stack: embassy_net::Stack<'_>,
-    timeout: Duration,
-) -> Result<(), NetworkError> {
-    use embassy_futures::select::{Either3, select3};
-    match select3(
-        async {
-            stack.wait_link_up().await;
-            stack.wait_config_up().await;
-        },
-        WIFI_CONNECT_FAILURE.wait(),
-        Timer::after(timeout),
-    )
-    .await
-    {
-        Either3::First(()) => Ok(()),
-        Either3::Second(e) => Err(NetworkError::ConnectFailed(e)),
-        Either3::Third(()) => Err(NetworkError::Timeout(timeout)),
-    }
-}
-
 /// The normal refresh flow: connect to WiFi with the stored credentials,
 /// fetch + decode the image (or an error frame on failure), trigger the
 /// real panel refresh on top of the background white pre-flash that
@@ -245,7 +199,6 @@ async fn wait_for_network_ready(
 /// 10-minute timer or a button press.
 async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let HardwareCtx {
-        spawner,
         mut rtc,
         wake_action,
         wifi,
@@ -255,35 +208,10 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         mut spi_bus,
         mut epd,
         mut tft_enable,
+        ..
     } = ctx;
 
     let (panel_width, panel_height) = panel::panel_size();
-
-    // --- WiFi bring-up (runs in parallel with any ongoing white pre-flash
-    // that `main` started before the config-mode race). Constructing the
-    // controller with `initial_config` starts the radio; dropping it
-    // stops it. ---
-    let station_config = esp_radio::wifi::Config::Station(
-        esp_radio::wifi::sta::StationConfig::default()
-            .with_ssid(creds.ssid.as_str())
-            .with_password(creds.password.as_str().into()),
-    );
-    let controller_config =
-        esp_radio::wifi::ControllerConfig::default().with_initial_config(station_config);
-    let (wifi_controller, interfaces) = esp_radio::wifi::new(wifi, controller_config)
-        .expect("Failed to initialize Wi-Fi controller");
-
-    let wifi_sta_device = interfaces.station;
-    let sta_config = embassy_net::Config::dhcpv4(Default::default());
-
-    let rng = esp_hal::rng::Rng::new();
-    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-
-    let (net_stack, net_runner) =
-        embassy_net::new(wifi_sta_device, sta_config, NETWORK_RESOURCES.take(), seed);
-
-    spawner.spawn(wifi_task(wifi_controller).unwrap());
-    spawner.spawn(net_task(net_runner).unwrap());
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
@@ -333,21 +261,34 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         }
     }
 
-    // Two stages that each might fail with a user-visible message:
-    //  1) wait for the network to come up (bounded by a timeout and a
-    //     fast bail-out on auth failure, so wrong creds don't brick
-    //     the device), and
-    //  2) fetch + decode the image.
-    // Any `Err` short-circuits to `error_image::render`, which then
-    // goes through the same panel-refresh path as a successful frame.
-    let fetch_result: Result<FetchOutcome, String> = async {
-        wait_for_network_ready(net_stack, WIFI_LINK_TIMEOUT)
-            .await
-            .map_err(|e| e.message(&creds.ssid))?;
-        println!("Fetching {}", current_url);
-        try_build_frame(net_stack, &current_url, panel_width, panel_height).await
-    }
-    .await;
+    // Bring WiFi up just long enough to do the HTTP fetch, then let
+    // `single_shot_wifi::run` tear it all down so PNG decoding runs
+    // with the radio off. PNG decoding is CPU-bound and expensive
+    // (minipng's decode buffer is the biggest transient allocation
+    // in the app), so keeping WiFi off for it saves the RF duty cycle.
+    let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), String> = {
+        let url_ref = current_url.as_str();
+        let wifi_result = reterminal_e100x::single_shot_wifi::run(
+            wifi,
+            &creds,
+            WIFI_LINK_TIMEOUT,
+            |stack| async move {
+                println!("Fetching {}", url_ref);
+                try_fetch(stack, url_ref).await
+            },
+        )
+        .await;
+        match wifi_result {
+            Ok(inner) => inner,
+            Err(e) => Err(e.message(&creds.ssid)),
+        }
+    };
+
+    // WiFi is now off. Decode (and palette-quantise) the PNG body.
+    let fetch_result: Result<(Vec<Spectra6Color>, Option<RefreshHint>), String> =
+        fetch_result.and_then(|(body, hint)| {
+            try_decode_frame(&body, panel_width, panel_height).map(|frame| (frame, hint))
+        });
 
     // Success ⇒ use the server's `Refresh` hint if it sent one, else
     // the long-form default. Error ⇒ short retry default so a
@@ -357,8 +298,8 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // automatically subtracted from the sleep duration when we
     // compute it below.
     let (frame, wakeup_requested): (_, embassy_time::Instant) = match fetch_result {
-        Ok(FetchOutcome { frame, refresh }) => {
-            match refresh.as_ref().and_then(|h| h.url_override.as_deref()) {
+        Ok((frame, hint)) => {
+            match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
                 // The server often sends relative URLs (e.g. just
                 // `/screen/foo`), so resolve against whatever we just
                 // fetched rather than the NVS base.
@@ -387,7 +328,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 // `take()`n on entry for Timer wakes).
                 None => {}
             }
-            let wakeup = refresh
+            let wakeup = hint
                 .map(|h| h.refresh_time)
                 .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_SUCCESS_SLEEP);
             (frame, wakeup)
@@ -482,45 +423,6 @@ async fn blink_task(mut led: Output<'static>) {
     }
 }
 
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Interface<'static>>) {
-    runner.run().await
-}
-
-/// Latest `connect_async` failure (if any) from `wifi_task`, surfaced to
-/// `main_normal` so it can bail out with an error frame instead of
-/// hanging on `net_stack.wait_link_up()`. `main_normal` races this
-/// against link-up and a timeout; it only ever takes the signal once
-/// per boot, so overwriting on each retry is fine — whichever error is
-/// current when main notices wins.
-static WIFI_CONNECT_FAILURE: embassy_sync::signal::Signal<
-    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-    esp_radio::wifi::WifiError,
-> = embassy_sync::signal::Signal::new();
-
-#[embassy_executor::task]
-async fn wifi_task(mut controller: esp_radio::wifi::WifiController<'static>) {
-    println!("Start connection task");
-    loop {
-        println!("Connecting WiFi");
-        match controller.connect_async().await {
-            Ok(_) => {
-                println!("Connected");
-                let info = controller.wait_for_disconnect_async().await.ok();
-                println!("Disconnected: {:?}", info);
-            }
-            Err(e) => {
-                println!("Failed to connect to wifi: {e:?}");
-                WIFI_CONNECT_FAILURE.signal(e);
-                println!("Retry in 5sec");
-                Timer::after(Duration::from_secs(5)).await;
-            }
-        }
-    }
-}
-
-use reterminal_e100x::net_resources::NETWORK_RESOURCES;
-
 use embedded_io_async::Read;
 
 /// Parse an `http://host[:port]/path[?query]` URL into its addressable
@@ -563,13 +465,6 @@ struct RefreshHint {
     url_override: Option<String>,
 }
 
-/// What `try_build_frame` returns on success: the decoded panel frame
-/// plus any server-side hint for the next refresh cycle.
-struct FetchOutcome {
-    frame: Vec<Spectra6Color>,
-    refresh: Option<RefreshHint>,
-}
-
 /// Parse a `Refresh: <secs>[; url=<url>]` header value into a
 /// `(Duration, Option<url>)`. Returns `None` for anything that doesn't
 /// start with a non-negative integer. The caller adds the `Duration`
@@ -599,18 +494,16 @@ fn parse_refresh_header(value: &str) -> Option<(embassy_time::Duration, Option<S
     Some((embassy_time::Duration::from_secs(interval_secs), url_override))
 }
 
-/// Fetch a pre-quantised palette PNG from `url`, decode it, and map its
-/// palette entries onto `Spectra6Color`, returning a row-major frame buffer
-/// sized to match the panel. On any HTTP / content-type / PNG / sizing
-/// failure, returns a human-readable error message; `text/plain` responses
-/// are treated as server-side errors and their body is surfaced as the
-/// error message.
-async fn try_build_frame<'t>(
+/// Fetch the body of `url` over HTTP and parse the `Refresh:` header
+/// if present. Returns the raw body bytes (expected to be PNG; the
+/// content-type classification checks that) plus a `RefreshHint`
+/// synthesised to fall back to `DEFAULT_SUCCESS_SLEEP` when the
+/// server didn't send a `Refresh`. `text/plain` response bodies are
+/// treated as server-side error messages regardless of status code.
+async fn try_fetch<'t>(
     stack: embassy_net::Stack<'t>,
     url: &str,
-    panel_width: usize,
-    panel_height: usize,
-) -> Result<FetchOutcome, String> {
+) -> Result<(Vec<u8>, Option<RefreshHint>), String> {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let (host, port, path) = parse_http_url(url)?;
@@ -750,8 +643,21 @@ async fn try_build_frame<'t>(
         }
     }
 
+    Ok((body, refresh_hint))
+}
+
+/// Decode a pre-quantised indexed PNG into a row-major `Spectra6Color`
+/// frame buffer sized to match the panel. Split out of `try_fetch`
+/// because the `minipng` decode buffer and palette lookup are by far
+/// the biggest transient allocations in the fetch cycle, and we run
+/// with WiFi off while they're in flight.
+fn try_decode_frame(
+    body: &[u8],
+    panel_width: usize,
+    panel_height: usize,
+) -> Result<Vec<Spectra6Color>, String> {
     println!("Decode PNG");
-    let header = minipng::decode_png_header(&body).map_err(|e| format!("PNG header: {:?}", e))?;
+    let header = minipng::decode_png_header(body).map_err(|e| format!("PNG header: {:?}", e))?;
     let required = header.required_bytes();
     let mut decode_buf: Vec<u8> = Vec::new();
     decode_buf
@@ -759,7 +665,7 @@ async fn try_build_frame<'t>(
         .map_err(|e| format!("OOM decode buffer ({} bytes): {:?}", required, e))?;
     decode_buf.resize(required, 0);
     let image =
-        minipng::decode_png(&body, &mut decode_buf).map_err(|e| format!("PNG decode: {:?}", e))?;
+        minipng::decode_png(body, &mut decode_buf).map_err(|e| format!("PNG decode: {:?}", e))?;
     println!("Decoded PNG");
     println!(
         "Image: {}x{} {:?} {:?}",
@@ -847,10 +753,7 @@ async fn try_build_frame<'t>(
             frame.push(png_palette[palette_index as usize]);
         }
     }
-    Ok(FetchOutcome {
-        frame,
-        refresh: refresh_hint,
-    })
+    Ok(frame)
 }
 
 /// Extract the palette index for pixel `x` in a row packed at `bit_depth`
