@@ -161,6 +161,55 @@ image pipeline be generic over the panel. The E1001 driver then only
 needs to provide its own PanelColor (probably an 8-level grayscale
 enum) and slot in.
 
+## Revisit the white pre-flash on E1004 — does it still earn its keep?
+
+The white pre-flash kicked off in `main.rs` before the config-mode
+race resolves exists purely as immediate visual feedback that the
+button press / power-on registered. Two things have changed since it
+was added:
+
+1. The wake-to-real-refresh window is now ~2 s (post
+   `single_shot_wifi::run` — was much longer when DHCP was unreliable).
+   That's how long the pre-flash gets before the real flow `reset()`s
+   the panel and aborts it (`src/bin/main.rs:346`). 2 s of an aborted
+   ~20 s e-ink transition probably *does* show some visible movement
+   on the panel, but it's worth checking whether it actually reads as
+   feedback or just as flicker.
+2. On the E1004 (1600×1200, 1.92 Mpx — five times the E1002's 384 kpx)
+   even just the SPI push to load the panel buffer is meaningfully
+   long, *and* every pre-flash kicks the panel into its high-current
+   refresh state for those ~2 s before we abort it. On battery this
+   adds up.
+
+Worth measuring (active-mA-seconds spent on the pre-flash, on both
+devices, plus a visual check of what the user actually sees) before
+deciding. Then pick from:
+
+- **Audible feedback instead of (or alongside) the visual flash.**
+  Same hardware question as the config-mode-feedback TODO below —
+  check the schematics for a piezo. A short tone is essentially free
+  power-wise compared to a panel push. LEDs aren't an option: both
+  devices have a status LED but it's on the backside, not user-facing.
+- **Centred "waiting" icon via a partial-area update.** Instead of
+  blanking the whole panel to white, draw a small icon (hourglass,
+  spinner, the device logo, …) in the middle and leave the rest as
+  whatever was last on the panel — both more informative as feedback
+  *and* potentially much cheaper if we can drive a sub-region rather
+  than the full 1.92 Mpx. Open hardware question: do the
+  `Gdep073e01` / `T133A01` Spectra-6 controllers expose a partial-
+  window refresh command? Multi-colour e-ink usually wants a
+  full-panel drive sequence, so check the datasheets before
+  committing — if partial-window isn't available, this collapses
+  back to "send a centred-icon frame as a full refresh", which still
+  reads better as feedback but doesn't save power.
+- **Cancel earlier.** Today we abort by `reset()`-ing the panel after
+  the config-mode race; if we could stop the in-progress
+  `update_frame` SPI stream the moment the real flow wins, we'd save
+  the rest of the push.
+
+Pairs with the audible-feedback TODO below — deciding the buzzer
+hardware story once would unblock both.
+
 ## Audible / visible "config mode entered" feedback
 
 Holding Previous+Next for 10 seconds without any indication that the
