@@ -237,17 +237,15 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 println!("Committing pending redirect as current URL: {}", r);
                 String::from(r.as_str())
             }
-            None => reterminal_e100x::url::strip_query_param(&current_url, "action"),
+            None => reterminal_e100x::url_util::set_query_variable(&current_url, "action", None),
         },
         other => {
             REDIRECT_URL.clear();
-            let stripped = reterminal_e100x::url::strip_query_param(&current_url, "action");
-            match other.action_name() {
-                Some(name) => {
-                    reterminal_e100x::url::append_query_param(&stripped, "action", name)
-                }
-                None => stripped,
-            }
+            reterminal_e100x::url_util::set_query_variable(
+                &current_url,
+                "action",
+                other.action_name(),
+            )
         }
     };
     match heapless::String::<STORED_URL_MAX>::try_from(current_url.as_str()) {
@@ -303,7 +301,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 // The server often sends relative URLs (e.g. just
                 // `/screen/foo`), so resolve against whatever we just
                 // fetched rather than the NVS base.
-                Some(raw) => match reterminal_e100x::url::resolve(&current_url, raw) {
+                Some(raw) => match reterminal_e100x::url_util::resolve(&current_url, raw) {
                     Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str())
                     {
                         Ok(stored) => {
@@ -425,31 +423,7 @@ async fn blink_task(mut led: Output<'static>) {
 
 use embedded_io_async::Read;
 
-/// Parse an `http://host[:port]/path[?query]` URL into its addressable
-/// parts. HTTPS isn't supported (we intentionally don't ship embedded-tls)
-/// so anything else is rejected up front.
-fn parse_http_url(url: &str) -> Result<(&str, u16, &str), String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| format!("URL must start with http:// : {}", url))?;
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (host, port) = match authority.rfind(':') {
-        Some(i) => {
-            let p: u16 = authority[i + 1..]
-                .parse()
-                .map_err(|_| format!("Invalid port in {}", url))?;
-            (&authority[..i], p)
-        }
-        None => (authority, 80u16),
-    };
-    if host.is_empty() {
-        return Err(format!("Empty host in {}", url));
-    }
-    Ok((host, port, path))
-}
+use reterminal_e100x::url_util::parse_http_url;
 
 /// Optional server hint parsed from the `Refresh:` response header —
 /// carries the target `Instant` at which the next fetch should happen
@@ -516,7 +490,7 @@ async fn try_fetch<'t>(
     } else {
         let dns = embassy_net::dns::DnsSocket::new(stack);
         let addrs = dns
-            .query(host, embassy_net::dns::DnsQueryType::A)
+            .query(&host, embassy_net::dns::DnsQueryType::A)
             .await
             .map_err(|e| format!("DNS {}: {:?}", host, e))?;
         let v4 = addrs.iter().find_map(|a| match a {
@@ -532,7 +506,7 @@ async fn try_fetch<'t>(
     let tcp = edge_nal_embassy::Tcp::new(stack, &tcp_buffers);
 
     let host_header = if port == 80 {
-        String::from(host)
+        host.clone()
     } else {
         format!("{}:{}", host, port)
     };
@@ -544,7 +518,7 @@ async fn try_fetch<'t>(
     conn.initiate_request(
         true,
         edge_http::Method::Get,
-        path,
+        &path,
         &[("Host", host_header.as_str()), ("Connection", "close")],
     )
     .await

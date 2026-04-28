@@ -20,4 +20,4 @@ pub mod rtc_persisted;
 pub mod single_shot_wifi;
 pub mod spectra6;
 pub mod t133a01;
-pub mod url;
+pub mod url_util;

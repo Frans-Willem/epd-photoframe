@@ -304,8 +304,9 @@ fn validate(raw: &RawSubmission) -> Result<PortalCreds, FormError> {
     }
     // `try_build_frame` requires http:// (no TLS in the build), so we
     // catch the typo at submit time rather than letting the next
-    // refresh fail.
-    if !raw.url.starts_with("http://") {
+    // refresh fail. Reuse the same parser the fetch path uses so
+    // structural issues (empty host, bad port, …) are caught here too.
+    if crate::url_util::parse_http_url(&raw.url).is_err() {
         return Err(FormError::MalformedUrl);
     }
     let password = if raw.password == PASSWORD_SENTINEL {
