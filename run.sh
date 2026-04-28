@@ -9,9 +9,8 @@
 # - Writes the new PID to /tmp/<device>_flash.pid.
 # - Runs under `script` so stdout goes both to the terminal and the
 #   supplied log file (via tee-like behavior).
-#
-# On exit the PID file is left in place so a subsequent `./run.sh ...`
-# invocation can spot and kill the previous session.
+# - Blocks in the foreground for the whole flash+monitor session;
+#   Ctrl-C ends it.
 
 set -euo pipefail
 
@@ -31,16 +30,17 @@ fi
 
 pid_file="/tmp/${device}_flash.pid"
 
-# Kill any still-running session for this device.
+# Kill any still-running session for this device. After `exec script
+# …` below, the recorded PID belongs to `script`, which forwards
+# signals to its child (the `cargo run` -> `espflash` chain) — so a
+# plain SIGTERM to that PID is enough to bring the whole tree down.
 if [[ -f "$pid_file" ]]; then
     old_pid=$(cat "$pid_file" 2>/dev/null || true)
     if [[ -n "${old_pid:-}" ]] && kill -0 "$old_pid" 2>/dev/null; then
         echo "killing previous flash session (pid $old_pid)" >&2
-        # Kill the whole process group so espflash/cargo/script all go down.
-        kill -TERM "-$old_pid" 2>/dev/null || kill -TERM "$old_pid" 2>/dev/null || true
-        # Give it a moment to release the serial port.
+        kill -TERM "$old_pid" 2>/dev/null || true
         sleep 2
-        kill -KILL "-$old_pid" 2>/dev/null || kill -KILL "$old_pid" 2>/dev/null || true
+        kill -KILL "$old_pid" 2>/dev/null || true
     fi
     rm -f "$pid_file"
 fi
@@ -49,10 +49,8 @@ fi
 # shellcheck disable=SC1090
 source "$HOME/export-esp.sh"
 
-# Run flash+monitor in its own process group so the kill above can
-# target it wholesale. `setsid` gives us a new PGID that matches the
-# leader PID; that's what we write to the PID file.
-exec setsid bash -c "
-    echo \$\$ > '$pid_file'
-    exec script -qfc 'cargo run --features $device -- --port $port' '$log'
-"
+# Record the PID and `exec` into `script`, so this shell process is
+# replaced by `script` (PID stays the same) and the wrapper blocks in
+# the foreground until `script` exits.
+echo $$ > "$pid_file"
+exec script -qfc "cargo run --features $device -- --port $port" "$log"
