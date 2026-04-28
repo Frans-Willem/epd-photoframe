@@ -35,8 +35,16 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
         spi_bus,
         epd,
         tft_enable,
+        mut buzzer,
         ..
     } = ctx;
+
+    // Audible "you can release the buttons now" cue. Fires before any
+    // panel work so the user gets feedback within ~80 ms of the
+    // 10-second hold completing, well before the QR + instructions
+    // appear on the panel a few seconds later.
+    println!("Config mode — beep");
+    buzzer.beep(Duration::from_millis(80)).await;
 
     // Current NVS values pre-fill the portal form so the user can edit
     // one field without re-typing the others. A non-empty stored

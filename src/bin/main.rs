@@ -990,6 +990,10 @@ async fn main(spawner: Spawner) -> ! {
         spi_bus: epd_spi_bus,
         epd,
         tft_enable,
+        buzzer: reterminal_e100x::buzzer::Buzzer::new(
+            peripherals.LEDC,
+            peripherals.GPIO45,
+        ),
     };
 
     if let Some(creds) = creds

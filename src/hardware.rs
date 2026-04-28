@@ -9,6 +9,8 @@ use embassy_executor::Spawner;
 use esp_hal::gpio::{AnyPin, Output};
 use esp_hal::spi::master::Spi;
 
+use crate::buzzer::Buzzer;
+
 #[cfg(feature = "e1002")]
 use crate::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1004")]
@@ -100,6 +102,11 @@ pub struct HardwareCtx {
     /// powered. Already configured high for devices that have it; `None`
     /// for devices that don't.
     pub tft_enable: Option<Output<'static>>,
+
+    /// Buzzer driver pre-built around the GPIO45 piezo + LEDC peripheral.
+    /// Always populated — both E1002 and E1004 have the piezo on the
+    /// same pin per Seeed's E10xx ESPHome reference.
+    pub buzzer: Buzzer,
 }
 
 /// Credentials + URL for the normal flow. Deliberately split out of
