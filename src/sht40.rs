@@ -21,8 +21,10 @@ pub struct TempHumidity {
 
 /// Take one high-precision measurement, returning `None` if the I²C
 /// transaction fails (sensor unplugged, bus held by something else,
-/// CRC mismatch, …).
-pub async fn read_temp_humidity(i2c: I2c<'static, Async>) -> Option<TempHumidity> {
+/// CRC mismatch, …). Borrows the bus for the duration of the
+/// transaction so other devices on the same I²C0 (PCF8563 RTC,
+/// SY6974B charger on E1004) can be read sequentially.
+pub async fn read_temp_humidity(i2c: &mut I2c<'static, Async>) -> Option<TempHumidity> {
     let mut sensor = Sht4xAsync::new(i2c);
     let mut delay = Delay;
     match sensor.measure(Precision::High, &mut delay).await {

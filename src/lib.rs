@@ -22,5 +22,6 @@ pub mod rtc_persisted;
 pub mod sht40;
 pub mod single_shot_wifi;
 pub mod spectra6;
+pub mod sy6974b;
 pub mod t133a01;
 pub mod url_util;

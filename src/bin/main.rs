@@ -284,6 +284,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 let battery_mv = BATTERY_MV.wait().await;
                 let battery_pct = reterminal_e100x::battery::mv_to_percentage(battery_mv);
                 let temp_humidity = TEMP_HUMIDITY.wait().await;
+                let power_status = POWER_STATUS.wait().await;
                 let fetch_url = reterminal_e100x::url_util::set_query_variable(
                     base_url_ref,
                     "battery_mv",
@@ -304,6 +305,15 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                         &url,
                         "humidity_pct",
                         Some(&format!("{:.2}", th.humidity_pct)),
+                    )
+                } else {
+                    fetch_url
+                };
+                let fetch_url = if let Some(ps) = power_status {
+                    reterminal_e100x::url_util::set_query_variable(
+                        &fetch_url,
+                        "power",
+                        Some(ps.as_str()),
                     )
                 } else {
                     fetch_url
@@ -471,20 +481,42 @@ static TEMP_HUMIDITY: embassy_sync::signal::Signal<
     Option<reterminal_e100x::sht40::TempHumidity>,
 > = embassy_sync::signal::Signal::new();
 
+/// SY6974B charger state — battery / charging / full / fault.
+/// E1004 only; on E1002 (different charger IC, no I²C) this stays
+/// `None` and the URL is built without a `power=` param. Set once
+/// per boot by `sensor_task`.
+static POWER_STATUS: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    Option<reterminal_e100x::sy6974b::PowerStatus>,
+> = embassy_sync::signal::Signal::new();
+
 #[embassy_executor::task]
 async fn sensor_task(
     battery_enable: Output<'static>,
     adc1: esp_hal::peripherals::ADC1<'static>,
     battery_sense: esp_hal::peripherals::GPIO1<'static>,
-    i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
+    mut i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
 ) {
-    let (battery_mv, temp_humidity) = embassy_futures::join::join(
+    // Battery (ADC + GPIO21) is independent of I²C0, so it runs in
+    // parallel with the I²C-bound chain. Inside the chain, reads
+    // share the bus sequentially: SHT40 first, then (E1004 only) the
+    // SY6974B charger.
+    let i2c_reads = async {
+        let temp_humidity = reterminal_e100x::sht40::read_temp_humidity(&mut i2c0).await;
+        #[cfg(feature = "e1004")]
+        let power_status = reterminal_e100x::sy6974b::read_power_status(&mut i2c0).await;
+        #[cfg(not(feature = "e1004"))]
+        let power_status: Option<reterminal_e100x::sy6974b::PowerStatus> = None;
+        (temp_humidity, power_status)
+    };
+    let (battery_mv, (temp_humidity, power_status)) = embassy_futures::join::join(
         reterminal_e100x::battery::read_battery(battery_enable, adc1, battery_sense),
-        reterminal_e100x::sht40::read_temp_humidity(i2c0),
+        i2c_reads,
     )
     .await;
     BATTERY_MV.signal(battery_mv);
     TEMP_HUMIDITY.signal(temp_humidity);
+    POWER_STATUS.signal(power_status);
 }
 
 use embedded_io_async::Read;
