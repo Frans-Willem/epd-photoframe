@@ -876,13 +876,13 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
 
+    // Status LED is on a different GPIO per device.
+    #[cfg(feature = "e1002")]
+    let led_pin = peripherals.GPIO6;
+    #[cfg(feature = "e1004")]
+    let led_pin = peripherals.GPIO48;
     spawner.spawn(
-        blink_task(Output::new(
-            peripherals.GPIO6,
-            Level::Low,
-            OutputConfig::default(),
-        ))
-        .unwrap(),
+        blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap(),
     );
 
     // Kick off the battery read in parallel — the 10 ms enable-settle
@@ -934,7 +934,7 @@ async fn main(spawner: Spawner) -> ! {
     #[cfg(feature = "e1002")]
     let mut epd = Gdep073e01::new(
         &mut epd_spi_bus,
-        Output::new(peripherals.GPIO20, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
         Input::new(
             peripherals.GPIO13,
             InputConfig::default().with_pull(Pull::Up),
