@@ -210,25 +210,25 @@ deciding. Then pick from:
 Pairs with the audible-feedback TODO below — deciding the buzzer
 hardware story once would unblock both.
 
-## Audible / visible "config mode entered" feedback
+## Distinguishable buzzer feedback per event
 
-Holding Previous+Next for 10 seconds without any indication that the
-device noticed is unnerving — the user can't tell whether to keep
-holding or if they've already succeeded (the e-ink doesn't re-paint
-until a second or two later). Research options to give immediate
-feedback the moment `entering_config_mode` resolves true:
+`config_mode::run` already opens with an ~80 ms 2 kHz tone via the
+GPIO45 piezo, so the "you can let go of the buttons now" cue is in.
+Two follow-ups worth picking up later:
 
-- **Beep.** Check the E1002 / E1004 schematics for a piezo /
-  speaker — ESP32-S3 has both a LEDC PWM peripheral and DACs that
-  could drive one. If there's hardware, a short tone (~50 ms) at the
-  race-end is the clearest signal.
-- **LED pattern change.** The status LED on GPIO6 already blinks via
-  `blink_task`. As a fallback if there's no audio path, switch to a
-  faster blink (or solid-on) when entering config mode; revert on
-  exit.
+- **Short beep on every button press** — a quick tap-tone on
+  Refresh / Previous / Next would confirm the press was registered,
+  which is useful given the panel itself doesn't visibly react until
+  the new frame paints (~2 s post-wake currently). Roughly the same
+  envelope as the config-mode tone but shorter (~30–40 ms).
+- **Longer / different tone on config-mode entry** — once button
+  presses are also beeping, the existing single 80 ms tone would
+  blend in with them. Differentiate the config-mode cue with a
+  longer duration, a different pitch, or a two-tone pattern so the
+  user can tell "registered a press" from "entered config mode".
 
-Pick whichever the hardware actually supports with minimal extra
-wiring.
+LEDs aren't an option — the status LED is on the backside of the
+device, not user-facing.
 
 ## Scan for nearby WiFi networks in the portal
 
