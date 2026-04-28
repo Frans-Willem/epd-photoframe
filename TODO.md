@@ -142,6 +142,37 @@ image pipeline be generic over the panel. The E1001 driver then only
 needs to provide its own PanelColor (probably an 8-level grayscale
 enum) and slot in.
 
+## E1004: investigate quad-SPI for panel data
+
+The 60-pin FPC on the E1004 routes four panel-side data lines:
+SPLD0..SPLD3 connect to GPIO9 (MOSI / SPLD0), GPIO8 (MISO / SPLD1),
+GPIO17 (SPLD2), and GPIO18 (SPLD3) — plus SPLCLK on GPIO7 and
+SPLCS_M on GPIO10. The schematic (page 8) shows a BS0 / BS1 strap
+table indicating the panel can run in 3-wire SPI, 4-wire SPI, or
+dual / quad SPI depending on those resistors.
+
+Today the firmware claims only MOSI + MISO via `Spi::with_mosi` /
+`with_miso` and leaves SPLD2 / SPLD3 floating. If the panel's
+strapping (the BS0 / BS1 resistor pair near the FPC) selects
+quad SPI, we're leaving 2× or 4× of the per-frame SPI write
+bandwidth on the table — meaningful on the 1600×1200 panel where
+loading a frame buffer is one of the longer steps.
+
+To do:
+
+1. Read the populated values of the BS0 / BS1 resistors on a real
+   device (or the BOM if available) to confirm which SPI mode the
+   panel is strapped for.
+2. If it's wider than single-data-line SPI, switch the SPI bus
+   setup in `main.rs` and the `T133A01` driver to esp-hal's
+   `with_sio2` / `with_sio3` (or whatever the equivalent quad-SPI
+   API is in 1.1.0-rc.0) and use `SpiDataMode::Quad`.
+3. Re-tune the SPI clock — quad mode often allows a higher
+   frequency too.
+4. Measure the frame-load time before and after.
+
+E1002 panel uses a different (50-pin) FPC and is not affected.
+
 ## Revisit the white pre-flash on E1004 — does it still earn its keep?
 
 The white pre-flash kicked off in `main.rs` before the config-mode
