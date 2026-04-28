@@ -308,24 +308,16 @@ Specifics to address:
 `Cargo.toml` currently patches two crates against upstream git commits
 because the fixes we need are merged but not yet released:
 
-- **`esp-nvs`** — pinned to `lhemala/esp-nvs` rev
-  `e371b050…` (PR #24, loosens the `esp-hal = "1.0.0"` requirement so
-  Cargo's pre-release rule accepts 1.1.0-rc.0). Drop when a post-0.4.0
-  release ships.
+- **`esp-nvs`** — pinned to `lhemala/esp-nvs` rev `e371b050…` (PR #24,
+  bumps `esp-storage` from `0.8.1` → `0.9.0` to match the rest of the
+  cascade). Released 0.4.0 still pins `esp-storage = "^0.8.1"`. Drop
+  when a post-0.4.0 release ships.
 - **`edge-nal`, `edge-nal-embassy`, `edge-http`, `edge-dhcp`,
   `edge-captive`** — all pinned to `ivmarkov/edge-net` master rev
-  `1f084b41…` (PR #90, bumps to embassy-net 0.9 / heapless 0.9). Drop
-  when a tagged release crossing that commit ships.
+  `1f084b41…` (PR #90, bumps to embassy-net 0.9 / heapless 0.9). The
+  most recent crates.io releases (0.7.0 / 0.8.1 from 2026-01-05) still
+  target embassy-net 0.8. Drop when a tagged release crossing that
+  commit ships.
 
 Check each on crates.io when doing the next `esp-hal` cascade upgrade
 and remove whichever pins have been released out from under them.
-
-## Move off `esp-hal 1.1.0-rc.0` once 1.1.0 ships stable
-
-We pulled in the rc deliberately for its calibrated RTC-slow sleep
-fix (see Cargo.toml comment) — all the cascaded esp-* / embassy / edge
-crates came with it. When `esp-hal 1.1.0` drops the `-rc` suffix,
-bump our pin to that (plain `"1.1.0"` or the then-current minor) and
-re-check each sibling for a matching stable release. The
-`[patch.crates-io]` entries for `esp-nvs` and the `edge-*` crates
-should be droppable at the same time (see the entry above).

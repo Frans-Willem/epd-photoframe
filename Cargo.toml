@@ -14,20 +14,7 @@ e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
 e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
 
 [dependencies]
-# esp-hal 1.1.0-rc.0 (not stable yet) is deliberately picked here:
-# it's the first release where `TimerWakeupSource::apply` converts the
-# requested sleep duration using the calibrated slow-clock period (via
-# `clock::us_to_rtc_ticks`) instead of the nominal 150 kHz, which
-# drops deep-sleep timing error from ±5 % to well under 1 %. That's
-# load-bearing for the 24 h refresh target — see the "Calibrated
-# sleep duration" TODO entry.
-#
-# This drags the rest of the esp-* / embassy stack up a notch each
-# (esp-rtos 0.3, esp-radio 0.18, embassy-executor 0.10, embassy-net
-# 0.9, smoltcp 0.13, heapless 0.9, …) because they all require
-# esp-hal ~1.1.0-rc.0. Revisit once esp-hal 1.1.0 lands stable and
-# flip everything off the rc.
-esp-hal = { version = "1.1.0-rc.0", features = ["esp32s3", "unstable"] }
+esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"] }
 
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
@@ -87,11 +74,11 @@ fluent-uri = { version = "0.4.1", default-features = false, features = ["alloc"]
 sht4x = { version = "0.2", default-features = false, features = ["embedded-hal-async"] }
 fixed = { version = "1.29", default-features = false }
 
-# Pull `esp-nvs` from the upstream PR that relaxes its `esp-hal`
-# version requirement to accept 1.1.0-rc.0 (and beyond). The released
-# 0.4.0 still pins `esp-hal = "1.0.0"`, which Cargo's pre-release rules
-# exclude from matching 1.1.0-rc.0. Drop this `[patch]` once the PR is
-# merged and a new esp-nvs release ships.
+# Pull `esp-nvs` from the upstream PR (lhemala/esp-nvs#24) that bumps
+# its `esp-storage` requirement to `0.9.0`. The released 0.4.0 still
+# pins `esp-storage = "^0.8.1"`, which conflicts with our `0.9.0`.
+# Drop this `[patch]` once the PR is merged and a new esp-nvs release
+# ships.
 # https://github.com/lhemala/esp-nvs/pull/24
 #
 # And the edge-* crates: the `embassy-net 0.9 / heapless 0.9` bump is
