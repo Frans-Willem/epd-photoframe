@@ -264,15 +264,37 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // with the radio off. PNG decoding is CPU-bound and expensive
     // (minipng's decode buffer is the biggest transient allocation
     // in the app), so keeping WiFi off for it saves the RF duty cycle.
+    //
+    // Sensor params (battery_mv, battery_pct, …) live on the fetch
+    // URL only, *not* on the persisted `current_url` — next wake's
+    // readings should be fresh. Awaiting `BATTERY_MV` here, inside
+    // the `single_shot_wifi::run` closure, is on purpose: the battery
+    // task was spawned at boot and runs concurrently with WiFi
+    // association (~1.3 s), so by the time WiFi is up and the closure
+    // fires the 10 ms ADC read has long since signaled and `wait()`
+    // returns instantly. Awaiting it before WiFi started would
+    // serialise the two and waste that overlap.
     let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), String> = {
-        let url_ref = current_url.as_str();
+        let base_url_ref = current_url.as_str();
         let wifi_result = reterminal_e100x::single_shot_wifi::run(
             wifi,
             &creds,
             WIFI_LINK_TIMEOUT,
             |stack| async move {
-                println!("Fetching {}", url_ref);
-                try_fetch(stack, url_ref).await
+                let battery_mv = reterminal_e100x::battery::BATTERY_MV.wait().await;
+                let battery_pct = reterminal_e100x::battery::mv_to_percentage(battery_mv);
+                let fetch_url = reterminal_e100x::url_util::set_query_variable(
+                    base_url_ref,
+                    "battery_mv",
+                    Some(&format!("{}", battery_mv)),
+                );
+                let fetch_url = reterminal_e100x::url_util::set_query_variable(
+                    &fetch_url,
+                    "battery_pct",
+                    Some(&format!("{}", battery_pct)),
+                );
+                println!("Fetching {}", fetch_url);
+                try_fetch(stack, &fetch_url).await
             },
         )
         .await;
@@ -860,6 +882,19 @@ async fn main(spawner: Spawner) -> ! {
             Level::Low,
             OutputConfig::default(),
         ))
+        .unwrap(),
+    );
+
+    // Kick off the battery read in parallel — the 10 ms enable-settle
+    // wait + ADC sample overlaps WiFi association below, so by the
+    // time `main_normal` builds the fetch URL the value is already
+    // sitting in `BATTERY_MV`.
+    spawner.spawn(
+        reterminal_e100x::battery::battery_task(
+            Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
+            peripherals.ADC1,
+            peripherals.GPIO1,
+        )
         .unwrap(),
     );
 

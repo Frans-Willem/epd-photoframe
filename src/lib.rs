@@ -6,6 +6,7 @@ compile_error!("features `e1002` and `e1004` are mutually exclusive");
 #[cfg(not(any(feature = "e1002", feature = "e1004")))]
 compile_error!("enable one of the device features: `e1002` or `e1004`");
 
+pub mod battery;
 pub mod buzzer;
 pub mod canvas;
 pub mod config;
