@@ -93,44 +93,6 @@ that don't fit a line on their own. The wrapped string then feeds
 `embedded_graphics::Text::with_baseline` the same way today. Both
 call sites can share the wrapper since they both use `FONT_10X20`.
 
-## Investigate slow DHCP acquisition on each wake
-
-Wake-to-`wait_config_up` seems to take a suspicious fraction of our
-active budget — worth measuring precisely and root-causing. Leading
-hypothesis: we start the `embassy-net` stack (which sends its first
-`DHCPDISCOVER` immediately) before the WiFi driver has associated
-and the link is actually up. That first discover gets dropped on
-the floor, and the embassy-net DHCP client's retry backoff is a few
-seconds, so we pay it on every cycle.
-
-Things to try:
-- Log timestamps at `wait_link_up().await` returning and
-  `wait_config_up().await` returning, to separate association time
-  from DHCP acquisition time.
-- If association is fast but DHCP is slow, gate the call to
-  `embassy_net::new` (or hold the runner task) until link-up, so
-  embassy-net's first discover goes out on a working link.
-- Also captures the "DHCP lease in RTC" TODO below — persisting the
-  lease skips the discover/request round-trip entirely on a matching
-  network.
-
-## Persist DHCP lease in RTC memory
-
-The RTC-persisted storage scaffolding (`src/rtc_persisted.rs`) is
-now wired up for the `Refresh:` header URL override. Stashing the
-current DHCP lease (IP, mask, gateway, DNS, lease TTL) in another
-`RtcPersisted<…>` slot would let the next wake skip the DHCP
-request entirely (`embassy_net::Config::ipv4_static` with the
-retained values) as long as the lease hasn't expired and the
-network is presumably the same. Saves a round-trip (~100-300 ms on
-a decent AP) per wake — noticeable over a day of timer-driven
-refreshes.
-
-Fall back to DHCP on: lease expired, retained values unreadable,
-or any failure on the first probe (e.g. gateway no longer
-responding). Sketch the fall-back as "try the static config, ping
-gateway, on failure tear down + redo with DHCP."
-
 ## Button presses during refresh are ignored
 
 During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
@@ -263,22 +225,6 @@ peripherals-ownership story would get a bit hand-wavy. Worth
 looking at what `esp_hal::uart::UartTx::new` actually does to see
 whether splitting the registers / using the existing `Uart` type
 alongside esp-println is explicitly supported.
-
-## Off-the-shelf URL helper crate
-
-`src/url.rs` rolls its own URL-resolution (`resolve(base, relative)`)
-and query-param append (`append_query_param`). Reasonable shortcut
-today — we only need a handful of specific transforms — but a
-proper no_std URL crate would handle the corners we currently don't
-(dot-segments, fragments in the base, percent-encoding of appended
-values). Candidates worth checking: `nourl` (already pulled in
-transitively by some embedded-nal-async stack, very minimal),
-`fluent-uri`, or `url` in no_std mode if its deps line up with
-ours.
-
-Swap once there's a pain point the hand-rolled helpers can't
-handle cleanly — right now they fit every URL the server has
-thrown at us.
 
 ## Re-audit direct dependencies
 
