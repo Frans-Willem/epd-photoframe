@@ -287,22 +287,6 @@ looking at what `esp_hal::uart::UartTx::new` actually does to see
 whether splitting the registers / using the existing `Uart` type
 alongside esp-println is explicitly supported.
 
-## Re-audit direct dependencies
-
-Some direct `[dependencies]` entries were added for crates that have
-since been ripped out (e.g. `heapless` came in with `leasehund`; that's
-gone, but we still use one `heapless::Vec::new()` call in
-`config_mode.rs` to build `StaticConfigV4.dns_servers`). Worth a sweep
-to confirm each direct dep has a real call site that isn't served by a
-re-export we already have in the tree.
-
-Specifics to address:
-
-- **`heapless` is mandatory** (embassy-net's `StaticConfigV4.dns_servers`
-  is typed as `heapless::Vec<Ipv4Address, 3>`, and embassy-net doesn't
-  re-export the type).  Dropping it would mean stopping the use of
-  `Config::ipv4_static` entirely, which isn't worth it.
-
 ## Drop `[patch.crates-io]` pins once upstream releases land
 
 `Cargo.toml` currently patches two crates against upstream git commits
