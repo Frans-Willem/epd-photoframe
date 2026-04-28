@@ -24,26 +24,6 @@ change, no schema migration.
 mode-selector (DHCP / static) on the portal form that conditionally
 shows the IP / mask / gateway / DNS fields.
 
-## Report battery / sensor readings to the server
-
-The README's Goal section has always called for per-wake sensor
-reporting (battery, temperature, humidity) but the firmware currently
-fetches the image with no side-band. Send the readings on every
-image GET — either as query-string params, HTTP headers, or a POST
-body — so the server can decide what to render based on current
-state (e.g. low-battery overlay, trending graphs).
-
-Likely shape:
-
-- Read ADC for battery voltage (plus whatever sensors are on the
-  I²C bus — check schematics).
-- Serialise into short header values:
-  `X-Battery-mV: 3920`, `X-Temp-C: 22.4`, etc.
-- Drop them into the `initiate_request` headers in `try_build_frame`.
-
-Keep the query-string-param backup in mind for servers / clients that
-strip custom headers.
-
 ## Harmonise padding between the QR and instructions area
 
 On the config-mode screen the QR code sits inside a 32 px margin (see
@@ -114,10 +94,11 @@ radio time).
 
 Remaining: audit what's *still* powered during the refresh /
 post-fetch stretch and shut down anything else we don't need. PSRAM
-(octal rail), the panel SPI bus after `power_off`, any sensor /
-ADC / I²C peripherals that might be left initialised. Battery /
-sensor reporting (the TODO above) is worth doing before the audit
-so we're not turning off things we're about to need.
+(octal rail), the panel SPI bus after `power_off`, the I²C0 bus
+after `sensor_task` finishes (SHT40 + SY6974B reads), and any other
+peripherals that might be left initialised. The sensor reads are
+already short-lived (their tasks exit after one measurement), so
+the bus should be safe to tear down before the deep-sleep call.
 
 The ~20 s panel-refresh wait already idles the CPU: our
 `wait_until_idle` is an interrupt-driven `busy.wait_for_high().await`,
