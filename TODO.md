@@ -58,6 +58,21 @@ margin and the text's top-left offset *and* right / bottom insets
 when wrapping. Pairs naturally with the word-aware-wrap TODO above,
 since the wrapper needs the effective text bounding box anyway.
 
+## Error frame should advertise the next retry time
+
+`error_image::render` shows the failure reason but doesn't tell the
+user when the device will try again. On the error path `main_normal`
+schedules a retry via `DEFAULT_ERROR_SLEEP` (10 min today) or whatever
+the server's `Refresh:` hint said — but that interval is invisible to
+whoever's looking at the panel. Add a line like "Will retry in
+10 minutes" / "Will retry at 14:05" to the error frame so the user
+knows whether to wait or to hit Refresh themselves.
+
+Implementation-wise: thread the planned wake `Instant` (or the
+`Duration` from now) into `error_image::render` and render it as an
+extra line below the error text. Pairs naturally with the word-aware
+text wrapping TODO below, since the extra line wants the same wrapper.
+
 ## Word-aware text wrapping for panel instructions + error frames
 
 Both `config_image::render` (the QR + instructions page) and
@@ -127,13 +142,31 @@ Consider handling this better — e.g. detect the press, reset the panel
 this were a fresh wake. Concretely, this probably means running a
 button-watching task concurrently with the refresh wait.
 
-## Power saving
+## Power saving — further audit
 
-The WiFi radio stays on through the entire refresh even though we don't
-need it after the image has been fetched. Turn it off as soon as
-`try_build_frame` returns. More generally: audit what's still powered
-between "image in memory" and "deep sleep" and shut down anything we
-don't need.
+WiFi is now brought up and torn down inside
+`single_shot_wifi::run`, so the radio is off for the ~20 s panel
+refresh + UART flush that used to run with it on. That also trimmed
+the on-time per cycle by ~8 s (lost DHCP backoff was pure wasted
+radio time).
+
+Remaining: audit what's *still* powered during the refresh /
+post-fetch stretch and shut down anything else we don't need. PSRAM
+(octal rail), the panel SPI bus after `power_off`, any sensor /
+ADC / I²C peripherals that might be left initialised. Battery /
+sensor reporting (the TODO above) is worth doing before the audit
+so we're not turning off things we're about to need.
+
+The ~20 s panel-refresh wait already idles the CPU: our
+`wait_until_idle` is an interrupt-driven `busy.wait_for_high().await`,
+so the task is parked until the GPIO interrupt fires, and esp-rtos's
+default idle hook (`esp-rtos-0.3.0/src/task/mod.rs:36`) loops on
+`esp_hal::interrupt::wait_for_interrupt()`, which is the core's WFI.
+So that window is already "sleeping" as far as the CPU core is
+concerned. Deeper sleep modes (light-sleep with RAM retention, or
+deep-sleep with RTC-IO wake and resume-on-next-boot) would save
+more — worth revisiting once we have battery-life measurements to
+justify the added complexity.
 
 ## Panel-trait abstraction for multi-palette support
 
