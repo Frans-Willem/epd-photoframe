@@ -4,25 +4,12 @@
 //! - GPIO1  — ADC1_CH0, signal is V_BAT / 2 (on-board divider).
 //! - GPIO21 — Enable for the divider's high side; must be high for at
 //!   least ~10 ms before the ADC sample for the rail to settle.
-//!
-//! Layout: a one-shot `battery_task` that runs the read sequence once
-//! per boot and signals the result on `BATTERY_MV`. Spawning it right
-//! after `esp_rtos::start` overlaps the 10 ms enable settle with WiFi
-//! association (~1.3 s), so by the time the URL is being built the
-//! value has been ready for over a second and `wait()` is essentially
-//! free.
 
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::{ADC1, GPIO1};
 use esp_println::println;
-
-/// Battery voltage in millivolts. `battery_task` signals this once per
-/// boot after the ADC sample completes.
-pub static BATTERY_MV: Signal<CriticalSectionRawMutex, u16> = Signal::new();
 
 /// Convert battery voltage in millivolts to a state-of-charge
 /// percentage using Seeed's 12-point breakpoint curve (linear
@@ -65,12 +52,13 @@ pub fn mv_to_percentage(mv: u16) -> u8 {
     0 // unreachable — clamped above
 }
 
-#[embassy_executor::task]
-pub async fn battery_task(
+/// Run the full enable → settle → sample → disable sequence and
+/// return battery voltage in millivolts.
+pub async fn read_battery(
     mut enable_pin: Output<'static>,
     adc_peripheral: ADC1<'static>,
     sense_pin: GPIO1<'static>,
-) {
+) -> u16 {
     enable_pin.set_high();
     Timer::after(Duration::from_millis(10)).await;
 
@@ -92,5 +80,5 @@ pub async fn battery_task(
         battery_mv,
         mv_to_percentage(battery_mv)
     );
-    BATTERY_MV.signal(battery_mv);
+    battery_mv
 }

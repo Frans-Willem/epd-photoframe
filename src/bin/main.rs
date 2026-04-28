@@ -281,8 +281,9 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
             &creds,
             WIFI_LINK_TIMEOUT,
             |stack| async move {
-                let battery_mv = reterminal_e100x::battery::BATTERY_MV.wait().await;
+                let battery_mv = BATTERY_MV.wait().await;
                 let battery_pct = reterminal_e100x::battery::mv_to_percentage(battery_mv);
+                let temp_humidity = TEMP_HUMIDITY.wait().await;
                 let fetch_url = reterminal_e100x::url_util::set_query_variable(
                     base_url_ref,
                     "battery_mv",
@@ -293,6 +294,20 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                     "battery_pct",
                     Some(&format!("{}", battery_pct)),
                 );
+                let fetch_url = if let Some(th) = temp_humidity {
+                    let url = reterminal_e100x::url_util::set_query_variable(
+                        &fetch_url,
+                        "temp_c",
+                        Some(&format!("{:.2}", th.temperature_c)),
+                    );
+                    reterminal_e100x::url_util::set_query_variable(
+                        &url,
+                        "humidity_pct",
+                        Some(&format!("{:.2}", th.humidity_pct)),
+                    )
+                } else {
+                    fetch_url
+                };
                 println!("Fetching {}", fetch_url);
                 try_fetch(stack, &fetch_url).await
             },
@@ -441,6 +456,35 @@ async fn blink_task(mut led: Output<'static>) {
         led.toggle();
         Timer::after(Duration::from_millis(500)).await;
     }
+}
+
+/// Battery voltage in millivolts. Set once per boot by `sensor_task`.
+static BATTERY_MV: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    u16,
+> = embassy_sync::signal::Signal::new();
+
+/// Temperature + relative humidity from the SHT40. `None` if the
+/// read failed. Set once per boot by `sensor_task`.
+static TEMP_HUMIDITY: embassy_sync::signal::Signal<
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    Option<reterminal_e100x::sht40::TempHumidity>,
+> = embassy_sync::signal::Signal::new();
+
+#[embassy_executor::task]
+async fn sensor_task(
+    battery_enable: Output<'static>,
+    adc1: esp_hal::peripherals::ADC1<'static>,
+    battery_sense: esp_hal::peripherals::GPIO1<'static>,
+    i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
+) {
+    let (battery_mv, temp_humidity) = embassy_futures::join::join(
+        reterminal_e100x::battery::read_battery(battery_enable, adc1, battery_sense),
+        reterminal_e100x::sht40::read_temp_humidity(i2c0),
+    )
+    .await;
+    BATTERY_MV.signal(battery_mv);
+    TEMP_HUMIDITY.signal(temp_humidity);
 }
 
 use embedded_io_async::Read;
@@ -885,15 +929,26 @@ async fn main(spawner: Spawner) -> ! {
         blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap(),
     );
 
-    // Kick off the battery read in parallel — the 10 ms enable-settle
-    // wait + ADC sample overlaps WiFi association below, so by the
-    // time `main_normal` builds the fetch URL the value is already
-    // sitting in `BATTERY_MV`.
+    // One task that drives both per-wake sensor reads (battery ADC +
+    // SHT40 over I²C0) concurrently via `join`. By the time the URL
+    // is being built in `main_normal`, both signals have been
+    // populated — the 10 ms ADC settle + the 10 ms SHT40 conversion
+    // happen alongside the ~1.3 s WiFi association, so the `wait()`s
+    // are essentially free.
+    let i2c0 = esp_hal::i2c::master::I2c::new(
+        peripherals.I2C0,
+        esp_hal::i2c::master::Config::default(),
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO19)
+    .with_scl(peripherals.GPIO20)
+    .into_async();
     spawner.spawn(
-        reterminal_e100x::battery::battery_task(
+        sensor_task(
             Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
             peripherals.ADC1,
             peripherals.GPIO1,
+            i2c0,
         )
         .unwrap(),
     );

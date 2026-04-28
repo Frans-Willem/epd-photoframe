@@ -84,6 +84,8 @@ embassy-sync = { version = "0.8", default-features = false }
 edge-nal = "0.6"
 edge-nal-embassy = { version = "0.8.1", default-features = false, features = ["tcp", "udp", "proto-ipv4"] }
 fluent-uri = { version = "0.4.1", default-features = false, features = ["alloc"] }
+sht4x = { version = "0.2", default-features = false, features = ["embedded-hal-async"] }
+fixed = { version = "1.29", default-features = false }
 
 # Pull `esp-nvs` from the upstream PR that relaxes its `esp-hal`
 # version requirement to accept 1.1.0-rc.0 (and beyond). The released
