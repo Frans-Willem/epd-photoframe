@@ -20,10 +20,10 @@
 //! controller-level commands over SPI: the high-voltage rails need to be
 //! on for both the SPI pixel upload and the actual refresh.
 
-use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
+use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
 use embedded_hal_async::spi::SpiBus;
 
-pub trait PanelColor: Copy + Default {
+pub trait PanelColor: PixelColor + Default {
     const BLACK: Self;
     const WHITE: Self;
 

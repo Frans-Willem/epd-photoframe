@@ -32,10 +32,9 @@ use alloc::vec::Vec;
 use reterminal_e100x::config::Config;
 use reterminal_e100x::config_mode;
 use reterminal_e100x::error_image;
-use reterminal_e100x::hardware::{EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
-use reterminal_e100x::panel::Panel;
+use reterminal_e100x::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
+use reterminal_e100x::panel::{Panel, PanelColor};
 use reterminal_e100x::rtc_persisted::RtcPersisted;
-use reterminal_e100x::spectra6::Spectra6Color;
 
 // Two URL slots live in RTC-slow RAM so they survive deep sleep:
 //
@@ -65,39 +64,6 @@ use reterminal_e100x::t133a01::T133A01;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
-
-// Reference RGB for each Spectra 6 ink, used to map PNG palette entries to the
-// closest `Spectra6Color`. Same for both Spectra 6 panels.
-const PALETTE: [[u8; 3]; 6] = [
-    [58, 0, 66],     // Black
-    [179, 208, 200], // White
-    [215, 233, 0],   // Yellow
-    [151, 38, 44],   // Red
-    [61, 38, 152],   // Blue
-    [96, 104, 86],   // Green
-];
-
-const PALETTE_COLORS: [Spectra6Color; 6] = [
-    Spectra6Color::Black,
-    Spectra6Color::White,
-    Spectra6Color::Yellow,
-    Spectra6Color::Red,
-    Spectra6Color::Blue,
-    Spectra6Color::Green,
-];
-
-fn color_distance(a: &[u8; 3], b: &[u8; 3]) -> u32 {
-    (0..3)
-        .map(|i| {
-            if a[i] > b[i] {
-                a[i] - b[i]
-            } else {
-                b[i] - a[i]
-            }
-        })
-        .map(|absdiff| (absdiff as u32) * (absdiff as u32))
-        .sum()
-}
 
 /// Block until the UART0 TX path has fully clocked out everything
 /// esp-println handed it. Polls the FIFO byte count down to zero, waits
@@ -332,7 +298,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // WiFi is now off. Decode (and palette-quantise) the PNG body.
     // Preserve the server's Refresh hint on decode errors so the
     // error path can still honour it.
-    let frame_result: Result<Vec<Spectra6Color>, String>;
+    let frame_result: Result<Vec<EpdColor>, String>;
     let hint: Option<RefreshHint>;
     match fetch_result {
         Ok((body, h)) => {
@@ -765,16 +731,17 @@ async fn try_fetch<'t>(
     Ok((body, refresh_hint))
 }
 
-/// Decode a pre-quantised indexed PNG into a row-major `Spectra6Color`
-/// frame buffer sized to match the panel. Split out of `try_fetch`
-/// because the `minipng` decode buffer and palette lookup are by far
-/// the biggest transient allocations in the fetch cycle, and we run
-/// with WiFi off while they're in flight.
-fn try_decode_frame(
+/// Decode a pre-quantised indexed PNG into a row-major frame buffer of
+/// the panel's colour type, sized to match the panel. Split out of
+/// `try_fetch` because the `minipng` decode buffer and palette lookup
+/// are by far the biggest transient allocations in the fetch cycle, and
+/// we run with WiFi off while they're in flight.
+fn try_decode_frame<C: PanelColor>(
     body: &[u8],
     panel_width: usize,
     panel_height: usize,
-) -> Result<Vec<Spectra6Color>, String> {
+) -> Result<Vec<C>, String> {
+    use embedded_graphics::pixelcolor::Rgb888;
     println!("Decode PNG");
     let header = minipng::decode_png_header(body).map_err(|e| format!("PNG header: {:?}", e))?;
     let required = header.required_bytes();
@@ -817,18 +784,12 @@ fn try_decode_frame(
         other => return Err(format!("Unsupported PNG bit depth: {:?}", other)),
     };
 
-    let png_palette: Vec<Spectra6Color> = (0..=255)
+    // Build a 256-entry lookup mapping PNG palette indices to the panel's
+    // colour type. The `from_rgb` cost is paid once per palette entry
+    // (max 256), not once per pixel.
+    let png_palette: Vec<C> = (0..=255)
         .map(|index| image.palette(index))
-        .map(|rgba| {
-            let rgb: [u8; 3] = [rgba[0], rgba[1], rgba[2]];
-            let best = PALETTE
-                .iter()
-                .enumerate()
-                .map(|(i, ref_rgb)| (i, color_distance(ref_rgb, &rgb)))
-                .reduce(|a, b| if a.1 < b.1 { a } else { b })
-                .unwrap();
-            PALETTE_COLORS[best.0]
-        })
+        .map(|rgba| C::from_rgb(Rgb888::new(rgba[0], rgba[1], rgba[2])))
         .collect();
 
     // Validate the decoded pixel buffer is self-consistent before indexing
@@ -861,7 +822,7 @@ fn try_decode_frame(
     }
 
     let frame_len = panel_width * panel_height;
-    let mut frame: Vec<Spectra6Color> = Vec::new();
+    let mut frame: Vec<C> = Vec::new();
     frame
         .try_reserve_exact(frame_len)
         .map_err(|e| format!("OOM frame buffer ({} bytes): {:?}", frame_len, e))?;
@@ -1107,7 +1068,7 @@ async fn main(spawner: Spawner) -> ! {
         println!("Update frame (white)");
         epd.update_frame(
             &mut epd_spi_bus,
-            (0..(EpdPanel::WIDTH * EpdPanel::HEIGHT)).map(|_| Spectra6Color::White),
+            (0..(EpdPanel::WIDTH * EpdPanel::HEIGHT)).map(|_| EpdColor::WHITE),
         )
         .await
         .unwrap();

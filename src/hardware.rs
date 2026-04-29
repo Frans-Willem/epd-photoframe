@@ -10,6 +10,7 @@ use esp_hal::gpio::{AnyPin, Output};
 use esp_hal::spi::master::Spi;
 
 use crate::buzzer::Buzzer;
+use crate::panel::Panel;
 
 #[cfg(feature = "e1002")]
 use crate::gdep073e01::Gdep073e01;
@@ -37,6 +38,11 @@ pub type EpdPanel = T133A01<
     Output<'static>, // rst
     Output<'static>, // en (TFT_EN rail)
 >;
+
+/// The panel's pixel colour type. Aliased through the `Panel` trait
+/// projection so callers can write `EpdColor::WHITE` etc. without
+/// hard-coding `Spectra6Color` / `Gray2` per device.
+pub type EpdColor = <EpdPanel as Panel<Spi<'static, esp_hal::Async>>>::Color;
 
 /// What the user (or the wake timer) wants us to do this cycle. Consumed
 /// by the normal flow to pick an `action=` query-string fragment and to

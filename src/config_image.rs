@@ -15,8 +15,8 @@ use embedded_graphics::primitives::Rectangle;
 use embedded_text::TextBox;
 
 use crate::canvas::Canvas;
+use crate::panel::PanelColor;
 use crate::qr_image;
-use crate::spectra6::Spectra6Color;
 
 /// Padding (panel pixels) on the outer panel edge and between the QR
 /// and text regions of the config screen.
@@ -24,29 +24,25 @@ const LAYOUT_PADDING_PX: u32 = 24;
 
 /// Render a configuration screen: `qr_payload` as a QR code on one side,
 /// `instructions` (plain text; word-wrapped to the text area's width) on
-/// the other. Returns the frame as a row-major `Vec<Spectra6Color>`.
-pub fn render(
+/// the other. Returns the frame as a row-major `Vec<C>` in the panel's
+/// colour space.
+pub fn render<C: PanelColor>(
     width: usize,
     height: usize,
     qr_payload: &str,
     instructions: &str,
-) -> Vec<Spectra6Color> {
-    let mut canvas = Canvas::new(width as u32, height as u32);
+) -> Vec<C> {
+    let mut canvas = Canvas::<C>::new(width as u32, height as u32, C::WHITE);
 
     let (qr_area, text_area) = split_regions(width as u32, height as u32, LAYOUT_PADDING_PX);
 
     {
         let mut sub = canvas.cropped(&qr_area);
-        let _ = qr_image::draw(
-            &mut sub,
-            qr_payload,
-            Spectra6Color::Black,
-            Spectra6Color::White,
-        );
+        let _ = qr_image::draw(&mut sub, qr_payload, C::BLACK, C::WHITE);
     }
     {
         let mut sub = canvas.cropped(&text_area);
-        let style = MonoTextStyle::new(&FONT_10X20, Spectra6Color::Black);
+        let style = MonoTextStyle::new(&FONT_10X20, C::BLACK);
         let bounds = Rectangle::new(Point::zero(), text_area.size);
         let _ = TextBox::new(instructions, bounds, style).draw(&mut sub);
     }

@@ -1,6 +1,6 @@
 use crate::panel::PanelColor;
 use embedded_graphics::pixelcolor::raw::RawU4;
-use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
+use embedded_graphics::pixelcolor::{PixelColor, Rgb888};
 
 #[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Spectra6Color {
@@ -41,27 +41,11 @@ impl PanelColor for Spectra6Color {
             .find_map(|(rgb, c)| (*c == *self).then_some(*rgb))
     }
 
-    /// Hand-tuned decision tree, faster than the default closest-match
-    /// search and correct for the panel's six paint colours.
-    fn from_rgb(value: Rgb888) -> Self {
-        if value.r() < 105 {
-            if value.b() < 109 {
-                if value.g() < 62 {
-                    Spectra6Color::Black
-                } else {
-                    Spectra6Color::Green
-                }
-            } else {
-                Spectra6Color::Blue
-            }
-        } else if value.g() < 120 {
-            Spectra6Color::Red
-        } else if value.b() < 150 {
-            Spectra6Color::Yellow
-        } else {
-            Spectra6Color::White
-        }
-    }
+    // `from_rgb` intentionally falls through to the default trait impl
+    // (closest-match search by squared Euclidean distance over `all()`,
+    // skipping `Clean` since its `to_rgb` is `None`). A previous hand-tuned
+    // decision tree variant was untested on hardware — see TODO.md
+    // ("Spectra6Color::from_rgb decision tree").
 }
 
 pub struct SpectraPacker<T>(pub T);

@@ -62,6 +62,82 @@ deep-sleep with RTC-IO wake and resume-on-next-boot) would save
 more — worth revisiting once we have battery-life measurements to
 justify the added complexity.
 
+## `Spectra6Color::from_rgb` decision tree
+
+`PanelColor::from_rgb` defaults to a closest-match search by squared
+Euclidean distance over `all()` — six iterations per pixel. There used
+to be a hand-tuned decision tree override on `Spectra6Color` that
+short-circuited that with hard-coded thresholds:
+
+```rust
+fn from_rgb(value: Rgb888) -> Self {
+    if value.r() < 105 {
+        if value.b() < 109 {
+            if value.g() < 62 {
+                Spectra6Color::Black
+            } else {
+                Spectra6Color::Green
+            }
+        } else {
+            Spectra6Color::Blue
+        }
+    } else if value.g() < 120 {
+        Spectra6Color::Red
+    } else if value.b() < 150 {
+        Spectra6Color::Yellow
+    } else {
+        Spectra6Color::White
+    }
+}
+```
+
+It was never validated on hardware — the partition planes happen to
+agree with `SPECTRA_6_PALETTE` for the six exact palette anchors but
+the behaviour at off-anchor RGBs was never measured against the
+closest-match version. We removed it for now in favour of the
+verified default; the per-pixel cost of the default isn't measurable
+in `try_decode_frame` because the lookup runs once per *PNG palette
+entry* (max 256), not once per pixel.
+
+To do, if we ever decide the per-palette closest-match cost matters:
+
+1. Generate a corpus of test RGBs (uniform sampling and the typical
+   server-emitted-then-dithered pixels we see in practice).
+2. Compare the decision tree's output against the closest-match output
+   pixel-for-pixel; find the points of disagreement.
+3. Either tune the thresholds until they agree, or accept the
+   disagreements as cosmetic and document why.
+4. Restore the override in `src/spectra6.rs` with a test that pins the
+   chosen thresholds.
+
+## SY6974B charger reporting on E1002 / E1001
+
+E1004 reads charger state from the SY6974B over I²C0 in `sensor_task`,
+and the URL-builder appends `power=` only when that read is `Some`. The
+cfg gate is currently `#[cfg(feature = "e1004")]`, with E1002 (and
+prospectively E1001) opting out.
+
+Per the Zephyr device trees for both 7" reTerminals
+([E1001](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1001/reterminal_e1001_procpu.dts),
+[E1002](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1002/reterminal_e1002_procpu.dts)),
+both devices carry a SY6974B at `i2c1 0x6B` — the difference vs E1004
+isn't "no charger", it's "different bus": E1004 puts the charger on
+I²C0 (already up for the SHT40), while E1001 / E1002 put it on I²C1
+(GPIO39 SDA / GPIO40 SCL, currently not initialised by the firmware).
+
+To do:
+
+1. Bring up I²C1 in `main()` alongside the existing I²C0 init; make
+   `sensor_task` accept both buses.
+2. Move the SY6974B read off I²C0 onto I²C1 for E1001 / E1002. E1004 stays
+   on I²C0 — same driver, different bus instance.
+3. Drop the `#[cfg(feature = "e1004")]` gate around the charger
+   read; populate `POWER_STATUS` on all three devices.
+
+DTS values to match if we ever write to `REG02` / `REG04`:
+charge current 500 mA, charge voltage 4.208 V on E1001 / E1002 (the
+E1004 DTS lists 1000 mA — a different battery pack).
+
 ## E1001 driver
 
 The `Panel` / `PanelColor` traits in `src/panel.rs` already abstract

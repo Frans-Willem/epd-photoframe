@@ -11,7 +11,7 @@ use embedded_graphics::primitives::Rectangle;
 use embedded_text::TextBox;
 
 use crate::canvas::Canvas;
-use crate::spectra6::Spectra6Color;
+use crate::panel::PanelColor;
 
 const MARGIN_PX: u32 = 24;
 
@@ -21,19 +21,19 @@ const MARGIN_PX: u32 = 24;
 const RECONFIGURE_HINT: &str =
     "To reconfigure, hold Previous+Next for 10 seconds during the next boot.";
 
-/// Render `message` as black text on a white Spectra 6 frame of the given
-/// dimensions and return the frame as a row-major `Vec<Spectra6Color>`.
-/// Appends a "Will retry in …" line plus the reconfigure hint below the
-/// caller's message — callers should supply only the failure-specific
-/// part.
-pub fn render(
+/// Render `message` as black text on a white frame of the given dimensions
+/// in the panel's colour space, returning the frame as a row-major
+/// `Vec<C>`. Appends a "Will retry in …" line plus the reconfigure hint
+/// below the caller's message — callers should supply only the
+/// failure-specific part.
+pub fn render<C: PanelColor>(
     width: usize,
     height: usize,
     message: &str,
     retry_in: Duration,
-) -> Vec<Spectra6Color> {
-    let mut canvas = Canvas::new(width as u32, height as u32);
-    let style = MonoTextStyle::new(&FONT_10X20, Spectra6Color::Black);
+) -> Vec<C> {
+    let mut canvas = Canvas::<C>::new(width as u32, height as u32, C::WHITE);
+    let style = MonoTextStyle::new(&FONT_10X20, C::BLACK);
 
     let full = build_text(message, retry_in);
     let bounds = Rectangle::new(

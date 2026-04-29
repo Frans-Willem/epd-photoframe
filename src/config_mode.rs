@@ -17,7 +17,7 @@ use esp_println::println;
 
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::{EpdPanel, HardwareCtx};
+use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
 use crate::net_resources::NETWORK_RESOURCES;
 use crate::panel::Panel;
 
@@ -220,7 +220,8 @@ async fn panel_render_task(
         ap_ssid, portal::REFRESH_BUTTON_LABEL
     );
     println!("Rendering config screen with QR: {}", qr_payload);
-    let frame = config_image::render(panel_width, panel_height, &qr_payload, &instructions);
+    let frame =
+        config_image::render::<EpdColor>(panel_width, panel_height, &qr_payload, &instructions);
 
     println!("Reset");
     epd.reset().await.unwrap();
