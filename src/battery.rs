@@ -52,8 +52,16 @@ pub fn mv_to_percentage(mv: u16) -> u8 {
     0 // unreachable — clamped above
 }
 
-/// Run the full enable → settle → sample → disable sequence and
-/// return battery voltage in millivolts.
+/// Number of ADC samples taken per `read_battery` call. Odd so the
+/// median is unambiguous; large enough to reject a couple of outliers,
+/// small enough to keep the overall sampling window short (≈ 8 ms).
+const SAMPLE_COUNT: usize = 9;
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Run the full enable → settle → sample-window → disable sequence and
+/// return battery voltage in millivolts. Takes nine ADC samples ~1 ms
+/// apart and returns the median, which rejects the occasional outlier
+/// that running concurrently with WiFi association can introduce.
 pub async fn read_battery(
     mut enable_pin: Output<'static>,
     adc_peripheral: ADC1<'static>,
@@ -67,13 +75,20 @@ pub async fn read_battery(
         .enable_pin_with_cal::<_, AdcCalCurve<ADC1<'static>>>(sense_pin, Attenuation::_11dB);
     let mut adc = Adc::new(adc_peripheral, adc_config);
 
+    let mut samples = [0u16; SAMPLE_COUNT];
+    for i in 0..SAMPLE_COUNT {
+        if i > 0 {
+            Timer::after(SAMPLE_INTERVAL).await;
+        }
+        samples[i] = adc.read_blocking(&mut adc_pin);
+    }
+    enable_pin.set_low();
+
+    samples.sort_unstable();
     // The curve calibration scheme returns mV directly; the ÷2 divider
     // on the board halves V_BAT into the ADC, so multiply by 2 to
     // recover battery voltage.
-    let sense_mv = adc.read_blocking(&mut adc_pin);
-    let battery_mv = sense_mv.saturating_mul(2);
-
-    enable_pin.set_low();
+    let battery_mv = samples[SAMPLE_COUNT / 2].saturating_mul(2);
 
     println!(
         "Battery: {} mV ({}%)",

@@ -62,20 +62,6 @@ deep-sleep with RTC-IO wake and resume-on-next-boot) would save
 more — worth revisiting once we have battery-life measurements to
 justify the added complexity.
 
-## Battery sense — average multiple samples for less noise
-
-`battery::read_battery` enables the divider, settles for 10 ms, takes
-a single `adc.read_blocking` sample, and disables the divider. The
-reported voltage is visibly noisy cycle-to-cycle, which makes the
-percentage estimate jitter and could trip a "low battery" threshold
-spuriously.
-
-Take multiple samples spread over a slightly longer window (e.g.
-8–16 reads spaced ~1 ms apart) and reduce — mean, or a median if
-we want to reject the occasional outlier — before applying the ÷2
-divider compensation. Keep the enable rail high for the whole
-window so each sample sees a settled divider.
-
 ## E1001 driver
 
 The `Panel` / `PanelColor` traits in `src/panel.rs` already abstract
