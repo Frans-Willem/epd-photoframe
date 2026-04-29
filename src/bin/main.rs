@@ -32,7 +32,8 @@ use alloc::vec::Vec;
 use reterminal_e100x::config::Config;
 use reterminal_e100x::config_mode;
 use reterminal_e100x::error_image;
-use reterminal_e100x::hardware::{HardwareCtx, WakeAction, WifiCredentials};
+use reterminal_e100x::hardware::{EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
+use reterminal_e100x::panel::Panel;
 use reterminal_e100x::rtc_persisted::RtcPersisted;
 use reterminal_e100x::spectra6::Spectra6Color;
 
@@ -57,9 +58,9 @@ static CURRENT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersiste
 static REDIRECT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersisted::new();
 
 #[cfg(feature = "e1002")]
-use reterminal_e100x::gdep073e01::{self as panel, Gdep073e01};
+use reterminal_e100x::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1004")]
-use reterminal_e100x::t133a01::{self as panel, T133A01};
+use reterminal_e100x::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -207,11 +208,10 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         mut gpio_btn_next,
         mut spi_bus,
         mut epd,
-        mut tft_enable,
         ..
     } = ctx;
 
-    let (panel_width, panel_height) = panel::panel_size();
+    let (panel_width, panel_height) = (EpdPanel::WIDTH, EpdPanel::HEIGHT);
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
@@ -392,7 +392,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     println!("Reset");
-    epd.reset(&mut embassy_time::Delay).await.unwrap();
+    epd.reset().await.unwrap();
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Init");
@@ -401,7 +401,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     epd.power_on(&mut spi_bus).await.unwrap();
     println!("Update frame");
     let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = panel::output_index_to_image_xy(idx);
+        let (x, y) = EpdPanel::output_index_to_image_xy(idx);
         frame[y * panel_width + x]
     });
     epd.update_frame(&mut spi_bus, data).await.unwrap();
@@ -412,10 +412,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
 
     println!("Power off");
     epd.power_off(&mut spi_bus).await.unwrap();
-
-    if let Some(ref mut tft) = tft_enable {
-        tft.set_low();
-    }
+    epd.disable().await.unwrap();
 
     println!("Done");
     let _ = epd;
@@ -1008,16 +1005,6 @@ async fn main(spawner: Spawner) -> ! {
         .with_mosi(peripherals.GPIO9)
         .into_async();
 
-    // E1004: TFT enable rail must be high while the panel is powered.
-    #[cfg(feature = "e1004")]
-    let tft_enable: Option<Output<'static>> = Some({
-        let mut p = Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default());
-        p.set_high();
-        p
-    });
-    #[cfg(feature = "e1002")]
-    let tft_enable: Option<Output<'static>> = None;
-
     #[cfg(feature = "e1002")]
     let mut epd = Gdep073e01::new(
         &mut epd_spi_bus,
@@ -1028,7 +1015,6 @@ async fn main(spawner: Spawner) -> ! {
         ),
         Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
         Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
-        &mut embassy_time::Delay,
     );
 
     #[cfg(feature = "e1004")]
@@ -1042,8 +1028,14 @@ async fn main(spawner: Spawner) -> ! {
         ),
         Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
         Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
-        &mut embassy_time::Delay,
+        // GPIO12: TFT_EN board rail (E1004 only); high while the panel is powered.
+        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
     );
+
+    // Bring up any board-level enable rail (E1004's TFT_EN; no-op on E1002)
+    // before any panel work. Done unconditionally — even when the white
+    // pre-flash is skipped, the rest of the flow assumes the rail is up.
+    epd.enable().await.unwrap();
 
     // --- White pre-flash (non-blocking) for immediate user feedback ---
     //
@@ -1053,10 +1045,9 @@ async fn main(spawner: Spawner) -> ! {
     // reset the panel to draw its own content on top; the ~20 s refresh
     // just continues in the background until then.
     if wake_action.show_white_flash() {
-        let (panel_width, panel_height) = panel::panel_size();
         println!("White pre-flash");
         println!("Reset");
-        epd.reset(&mut embassy_time::Delay).await.unwrap();
+        epd.reset().await.unwrap();
         println!("Wait until idle");
         epd.wait_until_idle().await.unwrap();
         println!("Init");
@@ -1066,7 +1057,7 @@ async fn main(spawner: Spawner) -> ! {
         println!("Update frame (white)");
         epd.update_frame(
             &mut epd_spi_bus,
-            (0..(panel_width * panel_height)).map(|_| Spectra6Color::White),
+            (0..(EpdPanel::WIDTH * EpdPanel::HEIGHT)).map(|_| Spectra6Color::White),
         )
         .await
         .unwrap();
@@ -1111,7 +1102,6 @@ async fn main(spawner: Spawner) -> ! {
         gpio_btn_next: gpio_btn_next.degrade(),
         spi_bus: epd_spi_bus,
         epd,
-        tft_enable,
         buzzer: reterminal_e100x::buzzer::Buzzer::new(
             peripherals.LEDC,
             peripherals.GPIO45,

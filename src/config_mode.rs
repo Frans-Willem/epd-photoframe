@@ -11,7 +11,7 @@ use alloc::string::String;
 
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
-use esp_hal::gpio::{Input, InputConfig, Output, Pull};
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::spi::master::Spi;
 use esp_println::println;
 
@@ -19,13 +19,9 @@ use crate::config::Config;
 use crate::config_image;
 use crate::hardware::{EpdPanel, HardwareCtx};
 use crate::net_resources::NETWORK_RESOURCES;
+use crate::panel::Panel;
 
 mod portal;
-
-#[cfg(feature = "e1002")]
-use crate::gdep073e01 as panel;
-#[cfg(feature = "e1004")]
-use crate::t133a01 as panel;
 
 pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     let HardwareCtx {
@@ -34,7 +30,6 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
         gpio_btn_refresh,
         spi_bus,
         epd,
-        tft_enable,
         mut buzzer,
         ..
     } = ctx;
@@ -116,7 +111,7 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // waiting for them. The software reset at the end of this function
     // cleanly interrupts the driver mid-update if the user wins the
     // race; the next boot's own panel reset recovers.
-    spawner.spawn(panel_render_task(spi_bus, epd, tft_enable, ap_ssid).unwrap());
+    spawner.spawn(panel_render_task(spi_bus, epd, ap_ssid).unwrap());
 
     // Two exits from config mode:
     //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
@@ -206,10 +201,9 @@ async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Inte
 async fn panel_render_task(
     mut spi_bus: Spi<'static, esp_hal::Async>,
     mut epd: EpdPanel,
-    mut tft_enable: Option<Output<'static>>,
     ap_ssid: String,
 ) {
-    let (panel_width, panel_height) = panel::panel_size();
+    let (panel_width, panel_height) = (EpdPanel::WIDTH, EpdPanel::HEIGHT);
     // The QR encodes a WiFi-join URI so most phones' camera-app scanners
     // offer a one-tap "Join network" action; the text below it gives the
     // SSID (for manual entry) and the portal URL as a fallback for users
@@ -230,7 +224,7 @@ async fn panel_render_task(
     let frame = config_image::render(panel_width, panel_height, &qr_payload, &instructions);
 
     println!("Reset");
-    epd.reset(&mut embassy_time::Delay).await.unwrap();
+    epd.reset().await.unwrap();
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Init");
@@ -239,7 +233,7 @@ async fn panel_render_task(
     epd.power_on(&mut spi_bus).await.unwrap();
     println!("Update frame (QR)");
     let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = panel::output_index_to_image_xy(idx);
+        let (x, y) = EpdPanel::output_index_to_image_xy(idx);
         frame[y * panel_width + x]
     });
     epd.update_frame(&mut spi_bus, data).await.unwrap();
@@ -249,9 +243,7 @@ async fn panel_render_task(
     epd.wait_until_idle().await.unwrap();
     println!("Power off");
     epd.power_off(&mut spi_bus).await.unwrap();
-    if let Some(ref mut tft) = tft_enable {
-        tft.set_low();
-    }
+    epd.disable().await.unwrap();
     println!("Config panel render done");
 }
 

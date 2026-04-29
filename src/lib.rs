@@ -17,6 +17,7 @@ pub mod gdep073e01;
 pub mod hardware;
 pub mod iter_util;
 pub mod net_resources;
+pub mod panel;
 pub mod qr_image;
 pub mod rtc_persisted;
 pub mod sht40;

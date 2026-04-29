@@ -1,9 +1,11 @@
+use crate::panel::PanelColor;
 use embedded_graphics::pixelcolor::raw::RawU4;
 use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Spectra6Color {
     Black = 0,
+    #[default]
     White = 1,
     Yellow = 2,
     Red = 3,
@@ -16,33 +18,48 @@ impl PixelColor for Spectra6Color {
     type Raw = RawU4;
 }
 
-impl From<Rgb888> for Spectra6Color {
-    fn from(value: Rgb888) -> Self {
+impl PanelColor for Spectra6Color {
+    const BLACK: Self = Spectra6Color::Black;
+    const WHITE: Self = Spectra6Color::White;
+
+    fn all() -> impl Iterator<Item = Self> {
+        [
+            Spectra6Color::Black,
+            Spectra6Color::White,
+            Spectra6Color::Yellow,
+            Spectra6Color::Red,
+            Spectra6Color::Blue,
+            Spectra6Color::Green,
+            Spectra6Color::Clean,
+        ]
+        .into_iter()
+    }
+
+    fn to_rgb(&self) -> Option<Rgb888> {
+        SPECTRA_6_PALETTE
+            .iter()
+            .find_map(|(rgb, c)| (*c == *self).then_some(*rgb))
+    }
+
+    /// Hand-tuned decision tree, faster than the default closest-match
+    /// search and correct for the panel's six paint colours.
+    fn from_rgb(value: Rgb888) -> Self {
         if value.r() < 105 {
-            // Distance 145
             if value.b() < 109 {
-                // Distance 153
                 if value.g() < 62 {
-                    // Distance 65
-                    return Spectra6Color::Black;
+                    Spectra6Color::Black
                 } else {
-                    return Spectra6Color::Green;
+                    Spectra6Color::Green
                 }
             } else {
-                return Spectra6Color::Blue;
+                Spectra6Color::Blue
             }
+        } else if value.g() < 120 {
+            Spectra6Color::Red
+        } else if value.b() < 150 {
+            Spectra6Color::Yellow
         } else {
-            if value.g() < 120 {
-                // Distance 203
-                return Spectra6Color::Red;
-            } else {
-                if value.b() < 150 {
-                    // Distance 164
-                    return Spectra6Color::Yellow;
-                } else {
-                    return Spectra6Color::White;
-                }
-            }
+            Spectra6Color::White
         }
     }
 }

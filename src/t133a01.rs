@@ -1,32 +1,15 @@
 use crate::iter_util::ChunksHeaplessExt;
+use crate::panel::Panel;
 use crate::spectra6::{Spectra6Color, SpectraPacker};
 use core::marker::PhantomData;
+use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiBus;
-use esp_println::println;
 
 const SINGLE_BYTE_WRITE: bool = false;
-
-pub const fn panel_size() -> (usize, usize) {
-    (1200, 1600)
-}
-
-/// Map a flat output index in `0..w*h` to the `(x, y)` coordinate the
-/// corresponding pixel should be fetched from in a row-major source image.
-/// The T133A01 has master/slave controllers each taking a half-width stripe,
-/// so the iterator emits the left half fully before the right half.
-pub const fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
-    let (w, h) = panel_size();
-    let half_width = w / 2;
-    let x = idx % half_width;
-    let y_total = idx / half_width;
-    let half = y_total / h;
-    let y = y_total % h;
-    let x = if half > 0 { x + half_width } else { x };
-    (x, y)
-}
+const PANEL_WIDTH: usize = 1200;
+const PANEL_HEIGHT: usize = 1600;
 
 #[allow(non_camel_case_types, dead_code)]
 #[derive(Copy, Clone)]
@@ -70,13 +53,13 @@ enum Controller {
     Both,
 }
 
-impl Into<u8> for Command {
-    fn into(self) -> u8 {
-        self as u8
+impl From<Command> for u8 {
+    fn from(c: Command) -> u8 {
+        c as u8
     }
 }
 
-pub enum T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>
+pub enum T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
 where
     SPI: SpiBus,
     CS_MASTER: OutputPin,
@@ -84,6 +67,7 @@ where
     BUSY: InputPin + Wait,
     DC: OutputPin,
     RST: OutputPin,
+    EN: OutputPin,
 {
     SPIError(SPI::Error),
     CSMasterError(CS_MASTER::Error),
@@ -91,10 +75,11 @@ where
     BUSYError(BUSY::Error),
     DCError(DC::Error),
     RSTError(RST::Error),
+    ENError(EN::Error),
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST> core::fmt::Debug
-    for T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>
+impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> core::fmt::Debug
+    for T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
 where
     SPI: SpiBus,
     CS_MASTER: OutputPin,
@@ -102,6 +87,7 @@ where
     BUSY: InputPin + Wait,
     DC: OutputPin,
     RST: OutputPin,
+    EN: OutputPin,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -111,22 +97,56 @@ where
             Self::BUSYError(x) => write!(f, "BUSYError({:?})", x),
             Self::DCError(x) => write!(f, "DCError({:?})", x),
             Self::RSTError(x) => write!(f, "RSTError({:?})", x),
+            Self::ENError(x) => write!(f, "ENError({:?})", x),
         }
     }
 }
 
-pub struct T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, DELAY> {
+pub struct T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> {
     _spi: PhantomData<SPI>,
-    _delay: PhantomData<DELAY>,
     cs_master: CS_MASTER,
     cs_slave: CS_SLAVE,
     busy: BUSY,
     dc: DC,
     rst: RST,
+    en: EN,
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, DELAY>
-    T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, DELAY>
+impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+    T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+where
+    CS_MASTER: OutputPin,
+    CS_SLAVE: OutputPin,
+{
+    /// `_spi` is taken only to fix `SPI` at the call site without
+    /// requiring a turbofish; the bus itself isn't stored.
+    pub fn new(
+        _spi: &mut SPI,
+        cs_master: CS_MASTER,
+        cs_slave: CS_SLAVE,
+        busy: BUSY,
+        dc: DC,
+        rst: RST,
+        en: EN,
+    ) -> Self {
+        let mut cs_master = cs_master;
+        cs_master.set_high().unwrap();
+        let mut cs_slave = cs_slave;
+        cs_slave.set_high().unwrap();
+        T133A01 {
+            _spi: PhantomData,
+            cs_master,
+            cs_slave,
+            busy,
+            dc,
+            rst,
+            en,
+        }
+    }
+}
+
+impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+    T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
 where
     SPI: SpiBus,
     CS_MASTER: OutputPin,
@@ -134,56 +154,8 @@ where
     BUSY: InputPin + Wait,
     DC: OutputPin,
     RST: OutputPin,
-    DELAY: DelayNs,
+    EN: OutputPin,
 {
-    pub fn new(
-        _: &mut SPI,
-        cs_master: CS_MASTER,
-        cs_slave: CS_SLAVE,
-        busy: BUSY,
-        dc: DC,
-        rst: RST,
-        _: &mut DELAY,
-    ) -> Self {
-        // Set both chip-selects high
-        let mut cs_master = cs_master;
-        cs_master.set_high().unwrap();
-        let mut cs_slave = cs_slave;
-        cs_slave.set_high().unwrap();
-        T133A01 {
-            _spi: PhantomData,
-            _delay: PhantomData,
-            cs_master,
-            cs_slave,
-            busy,
-            dc,
-            rst,
-        }
-    }
-
-    pub async fn reset(
-        &mut self,
-        delay: &mut DELAY,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
-        // TODO: Can I lower these to 10_000?
-        self.rst.set_high().map_err(T133A01Error::RSTError)?;
-        delay.delay_us(20_000).await;
-        self.rst.set_low().map_err(T133A01Error::RSTError)?;
-        delay.delay_us(20_000).await;
-        self.rst.set_high().map_err(T133A01Error::RSTError)?;
-        delay.delay_us(20_000).await;
-        Ok(())
-    }
-
-    pub async fn wait_until_idle(
-        &mut self,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
-        self.busy
-            .wait_for_high()
-            .await
-            .map_err(T133A01Error::BUSYError)
-    }
-
     pub fn is_busy(&mut self) -> bool {
         self.busy.is_low().unwrap()
     }
@@ -194,7 +166,7 @@ where
         controller: Controller,
         command: Command,
         data: impl IntoIterator<Item = u8>,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>> {
         // Assert chip select, pull low
         match controller {
             Controller::Master => self
@@ -251,11 +223,58 @@ where
         };
         Ok(())
     }
+}
 
-    pub async fn init(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> Panel<SPI>
+    for T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+where
+    SPI: SpiBus,
+    CS_MASTER: OutputPin,
+    CS_SLAVE: OutputPin,
+    BUSY: InputPin + Wait,
+    DC: OutputPin,
+    RST: OutputPin,
+    EN: OutputPin,
+{
+    type Color = Spectra6Color;
+    type Error = T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>;
+
+    const WIDTH: usize = PANEL_WIDTH;
+    const HEIGHT: usize = PANEL_HEIGHT;
+
+    /// The T133A01 has master/slave controllers each taking a half-width
+    /// stripe, so the iterator emits the left half fully before the right
+    /// half.
+    fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+        let half_width = PANEL_WIDTH / 2;
+        let x = idx % half_width;
+        let y_total = idx / half_width;
+        let half = y_total / PANEL_HEIGHT;
+        let y = y_total % PANEL_HEIGHT;
+        let x = if half > 0 { x + half_width } else { x };
+        (x, y)
+    }
+
+    async fn enable(&mut self) -> Result<(), Self::Error> {
+        self.en.set_high().map_err(T133A01Error::ENError)
+    }
+
+    async fn disable(&mut self) -> Result<(), Self::Error> {
+        self.en.set_low().map_err(T133A01Error::ENError)
+    }
+
+    async fn reset(&mut self) -> Result<(), Self::Error> {
+        // TODO: Can I lower these to 10ms?
+        self.rst.set_high().map_err(T133A01Error::RSTError)?;
+        Timer::after(Duration::from_millis(20)).await;
+        self.rst.set_low().map_err(T133A01Error::RSTError)?;
+        Timer::after(Duration::from_millis(20)).await;
+        self.rst.set_high().map_err(T133A01Error::RSTError)?;
+        Timer::after(Duration::from_millis(20)).await;
+        Ok(())
+    }
+
+    async fn init(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         // NOTE: Call after reset
         self.command(
             spi,
@@ -324,31 +343,25 @@ where
         Ok(())
     }
 
-    pub async fn power_on(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+    async fn power_on(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::PowerOn, [])
             .await?;
         self.wait_until_idle().await?;
         Ok(())
     }
 
-    pub async fn power_off(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+    async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::PowerOff, [0x00])
             .await?;
         self.wait_until_idle().await?;
         Ok(())
     }
 
-    pub async fn update_frame(
+    async fn update_frame(
         &mut self,
         spi: &mut SPI,
-        pixels: impl IntoIterator<Item = Spectra6Color>,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+        pixels: impl IntoIterator<Item = Self::Color>,
+    ) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::CCSET, [0x01])
             .await?;
         self.wait_until_idle().await?;
@@ -357,7 +370,7 @@ where
             spi,
             Controller::Master,
             Command::DataStartTransmission,
-            data.by_ref().take(1600 * 1200 / 4),
+            data.by_ref().take(PANEL_WIDTH * PANEL_HEIGHT / 4),
         )
         .await?;
         self.command(spi, Controller::Slave, Command::DataStartTransmission, data)
@@ -365,98 +378,15 @@ where
         Ok(())
     }
 
-    /// Triggers a display refresh and returns immediately without waiting for
-    /// it to complete. A full refresh takes ~20 seconds; call
-    /// [`wait_until_idle`](Self::wait_until_idle) afterwards to block, or
-    /// [`reset`](Self::reset) to abort.
-    pub async fn display_frame_no_wait(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST>> {
+    async fn display_frame_no_wait(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::DisplayRefresh, [0x01])
             .await
     }
 
-    /*
-    async fn command(&mut self, spi: &mut SPI, cmd: Command, data: &[u8]) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.interface.command(spi, cmd, data).await
-    }
-
-    async fn command_mirror(&mut self, spi: &mut SPI, cmd: Command, data: &[u8]) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.cs_slave.set_low().unwrap();
-        let ret = self.interface.command(spi, cmd, data).await;
-        self.cs_slave.set_high().unwrap();
-        ret
-    }
-
-    pub async fn init(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-    }
-    pub async fn wait_until_idle(
-        &mut self,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.interface.wait_until_idle(IS_BUSY_LOW).await
-    }
-
-    pub async fn update_frame_raw(
-        &mut self,
-        spi: &mut SPI,
-        data: impl IntoIterator<Item = u8>,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.cs_slave.set_low().unwrap();
-        self.interface
-            .cmd(spi, Command::DataStartTransmission)
-            .await?;
-        self.interface.data_iter(spi, data).await?;
-        self.cs_slave.set_high().unwrap();
-        Ok(())
-    }
-
-    pub async fn update_frame(
-        &mut self,
-        spi: &mut SPI,
-        pixels: impl IntoIterator<Item = Spectra6Color>,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.update_frame_raw(spi, SpectraPacker(pixels.into_iter()))
+    async fn wait_until_idle(&mut self) -> Result<(), Self::Error> {
+        self.busy
+            .wait_for_high()
             .await
+            .map_err(T133A01Error::BUSYError)
     }
-
-    pub async fn display_frame(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.cs_slave.set_low().unwrap();
-        let ret = self.interface
-            .command(spi, Command::DisplayRefresh, &[0x00])
-            .await;
-        self.cs_slave.set_high().unwrap();
-        ret
-        // NOTE: Must wait here
-    }
-    pub async fn power_on(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.cs_slave.set_low().unwrap();
-        let ret = self.interface.cmd(spi, Command::PowerOn).await;
-        self.cs_slave.set_high().unwrap();
-        ret
-        // NOTE: Must wait here
-    }
-
-    pub async fn power_off(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), DisplayInterfaceAsyncError<SPI, BUSY, DC, RST>> {
-        self.cs_slave.set_low().unwrap();
-        let ret = self.interface
-            .command(spi, Command::PowerOff, &[0x00])
-            .await;
-        self.cs_slave.set_high().unwrap();
-        ret
-        //NOTE: Must wait here
-    }
-    */
 }

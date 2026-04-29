@@ -1,24 +1,14 @@
 use crate::iter_util::ChunksHeaplessExt;
+use crate::panel::Panel;
 use crate::spectra6::{Spectra6Color, SpectraPacker};
 use core::marker::PhantomData;
+use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiBus;
 
 // Panel: GooDisplay GDEP073E01 (800x480, Spectra 6, found in reTerminal E1002).
 // Controller appears similar to UC8159 / SPD1656.
-
-pub const fn panel_size() -> (usize, usize) {
-    (800, 480)
-}
-
-/// Map a flat output index in `0..w*h` to the `(x, y)` coordinate the
-/// corresponding pixel should be fetched from in a row-major source image.
-pub const fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
-    let (w, _) = panel_size();
-    (idx % w, idx / w)
-}
 
 #[allow(non_camel_case_types, dead_code)]
 #[derive(Copy, Clone)]
@@ -83,58 +73,41 @@ where
     }
 }
 
-pub struct Gdep073e01<SPI, CS, BUSY, DC, RST, DELAY> {
+pub struct Gdep073e01<SPI, CS, BUSY, DC, RST> {
     _spi: PhantomData<SPI>,
-    _delay: PhantomData<DELAY>,
     cs: CS,
     busy: BUSY,
     dc: DC,
     rst: RST,
 }
 
-impl<SPI, CS, BUSY, DC, RST, DELAY> Gdep073e01<SPI, CS, BUSY, DC, RST, DELAY>
+impl<SPI, CS, BUSY, DC, RST> Gdep073e01<SPI, CS, BUSY, DC, RST>
 where
-    SPI: SpiBus,
     CS: OutputPin,
-    BUSY: InputPin + Wait,
-    DC: OutputPin,
-    RST: OutputPin,
-    DELAY: DelayNs,
 {
-    pub fn new(_: &mut SPI, cs: CS, busy: BUSY, dc: DC, rst: RST, _: &mut DELAY) -> Self {
+    /// `_spi` is taken only to fix `SPI` at the call site without
+    /// requiring a turbofish; the bus itself isn't stored.
+    pub fn new(_spi: &mut SPI, cs: CS, busy: BUSY, dc: DC, rst: RST) -> Self {
         let mut cs = cs;
         cs.set_high().unwrap();
         Gdep073e01 {
             _spi: PhantomData,
-            _delay: PhantomData,
             cs,
             busy,
             dc,
             rst,
         }
     }
+}
 
-    pub async fn reset(
-        &mut self,
-        delay: &mut DELAY,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
-        self.rst.set_high().map_err(Gdep073e01Error::RSTError)?;
-        delay.delay_us(10_000).await;
-        self.rst.set_low().map_err(Gdep073e01Error::RSTError)?;
-        delay.delay_us(10_000).await;
-        self.rst.set_high().map_err(Gdep073e01Error::RSTError)?;
-        delay.delay_us(10_000).await;
-        Ok(())
-    }
-
-    pub async fn wait_until_idle(&mut self) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
-        // BUSY is low while the panel is busy, high when idle.
-        self.busy
-            .wait_for_high()
-            .await
-            .map_err(Gdep073e01Error::BUSYError)
-    }
-
+impl<SPI, CS, BUSY, DC, RST> Gdep073e01<SPI, CS, BUSY, DC, RST>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    BUSY: InputPin + Wait,
+    DC: OutputPin,
+    RST: OutputPin,
+{
     async fn command(
         &mut self,
         spi: &mut SPI,
@@ -153,11 +126,45 @@ where
         self.cs.set_high().map_err(Gdep073e01Error::CSError)?;
         Ok(())
     }
+}
 
-    pub async fn init(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+impl<SPI, CS, BUSY, DC, RST> Panel<SPI> for Gdep073e01<SPI, CS, BUSY, DC, RST>
+where
+    SPI: SpiBus,
+    CS: OutputPin,
+    BUSY: InputPin + Wait,
+    DC: OutputPin,
+    RST: OutputPin,
+{
+    type Color = Spectra6Color;
+    type Error = Gdep073e01Error<SPI, CS, BUSY, DC, RST>;
+
+    const WIDTH: usize = 800;
+    const HEIGHT: usize = 480;
+
+    fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
+        (idx % Self::WIDTH, idx / Self::WIDTH)
+    }
+
+    async fn enable(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn disable(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn reset(&mut self) -> Result<(), Self::Error> {
+        self.rst.set_high().map_err(Gdep073e01Error::RSTError)?;
+        Timer::after(Duration::from_millis(10)).await;
+        self.rst.set_low().map_err(Gdep073e01Error::RSTError)?;
+        Timer::after(Duration::from_millis(10)).await;
+        self.rst.set_high().map_err(Gdep073e01Error::RSTError)?;
+        Timer::after(Duration::from_millis(10)).await;
+        Ok(())
+    }
+
+    async fn init(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         // Call after reset.
         self.command(spi, Command::CMDH, [0x49, 0x55, 0x20, 0x08, 0x09, 0x18])
             .await?;
@@ -182,29 +189,23 @@ where
         Ok(())
     }
 
-    pub async fn power_on(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+    async fn power_on(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Command::PowerOn, []).await?;
         self.wait_until_idle().await?;
         Ok(())
     }
 
-    pub async fn power_off(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+    async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Command::PowerOff, [0x00]).await?;
         self.wait_until_idle().await?;
         Ok(())
     }
 
-    pub async fn update_frame(
+    async fn update_frame(
         &mut self,
         spi: &mut SPI,
-        pixels: impl IntoIterator<Item = Spectra6Color>,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+        pixels: impl IntoIterator<Item = Self::Color>,
+    ) -> Result<(), Self::Error> {
         self.command(
             spi,
             Command::DataStartTransmission,
@@ -213,14 +214,15 @@ where
         .await
     }
 
-    /// Triggers a display refresh and returns immediately without waiting for
-    /// it to complete. A full refresh takes ~20 seconds; call
-    /// [`wait_until_idle`](Self::wait_until_idle) afterwards to block, or
-    /// [`reset`](Self::reset) to abort.
-    pub async fn display_frame_no_wait(
-        &mut self,
-        spi: &mut SPI,
-    ) -> Result<(), Gdep073e01Error<SPI, CS, BUSY, DC, RST>> {
+    async fn display_frame_no_wait(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Command::DisplayRefresh, [0x00]).await
+    }
+
+    async fn wait_until_idle(&mut self) -> Result<(), Self::Error> {
+        // BUSY is low while the panel is busy, high when idle.
+        self.busy
+            .wait_for_high()
+            .await
+            .map_err(Gdep073e01Error::BUSYError)
     }
 }

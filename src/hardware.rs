@@ -16,10 +16,9 @@ use crate::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1004")]
 use crate::t133a01::T133A01;
 
-/// Fully-specialised type of the built panel driver. Both variants expose
-/// the same method API (`reset` / `init` / `power_on` / `update_frame` /
-/// `display_frame_no_wait` / `wait_until_idle` / `power_off`), so the rest
-/// of the firmware can use `EpdPanel` without cfg gates.
+/// Fully-specialised type of the built panel driver. Both variants
+/// implement the [`crate::panel::Panel`] trait so the rest of the firmware
+/// can drive the panel without caring which model it is.
 #[cfg(feature = "e1002")]
 pub type EpdPanel = Gdep073e01<
     Spi<'static, esp_hal::Async>,
@@ -27,7 +26,6 @@ pub type EpdPanel = Gdep073e01<
     esp_hal::gpio::Input<'static>,
     Output<'static>,
     Output<'static>,
-    embassy_time::Delay,
 >;
 #[cfg(feature = "e1004")]
 pub type EpdPanel = T133A01<
@@ -37,7 +35,7 @@ pub type EpdPanel = T133A01<
     esp_hal::gpio::Input<'static>,
     Output<'static>, // dc
     Output<'static>, // rst
-    embassy_time::Delay,
+    Output<'static>, // en (TFT_EN rail)
 >;
 
 /// What the user (or the wake timer) wants us to do this cycle. Consumed
@@ -94,14 +92,11 @@ pub struct HardwareCtx {
     pub gpio_btn_next: AnyPin<'static>,
 
     /// Pre-built SPI bus (SCK/MOSI, plus MISO on E1004) and pre-built EPD
-    /// driver holding its CS/BUSY/DC/RST pins.
+    /// driver holding its CS/BUSY/DC/RST (and EN, on E1004) pins. The
+    /// driver implements [`crate::panel::Panel`] including `enable` /
+    /// `disable` for the board-level TFT rail on devices that have one.
     pub spi_bus: Spi<'static, esp_hal::Async>,
     pub epd: EpdPanel,
-
-    /// E1004 drives a TFT-enable rail that must be high while the panel is
-    /// powered. Already configured high for devices that have it; `None`
-    /// for devices that don't.
-    pub tft_enable: Option<Output<'static>>,
 
     /// Buzzer driver pre-built around the GPIO45 piezo + LEDC peripheral.
     /// Always populated — both E1002 and E1004 have the piezo on the
