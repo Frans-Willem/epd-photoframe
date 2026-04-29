@@ -57,6 +57,7 @@ esp-backtrace = { version = "0.19.0", features = ["esp32s3", "println", "panic-h
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embedded-graphics = "0.8.2"
+embedded-text = "0.7.3"
 minipng = "1.0.0"
 esp-storage = { version = "0.9.0", features = ["esp32s3"] }
 esp-nvs = { version = "0.4.0", features = ["esp32s3"] }

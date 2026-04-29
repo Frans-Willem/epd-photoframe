@@ -274,7 +274,7 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // fires the 10 ms ADC read has long since signaled and `wait()`
     // returns instantly. Awaiting it before WiFi started would
     // serialise the two and waste that overlap.
-    let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), String> = {
+    let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), FetchError> = {
         let base_url_ref = current_url.as_str();
         let wifi_result = reterminal_e100x::single_shot_wifi::run(
             wifi,
@@ -325,25 +325,36 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
         .await;
         match wifi_result {
             Ok(inner) => inner,
-            Err(e) => Err(e.message(&creds.ssid)),
+            Err(e) => Err(FetchError::from(e.message(&creds.ssid))),
         }
     };
 
     // WiFi is now off. Decode (and palette-quantise) the PNG body.
-    let fetch_result: Result<(Vec<Spectra6Color>, Option<RefreshHint>), String> =
-        fetch_result.and_then(|(body, hint)| {
-            try_decode_frame(&body, panel_width, panel_height).map(|frame| (frame, hint))
-        });
+    // Preserve the server's Refresh hint on decode errors so the
+    // error path can still honour it.
+    let frame_result: Result<Vec<Spectra6Color>, String>;
+    let hint: Option<RefreshHint>;
+    match fetch_result {
+        Ok((body, h)) => {
+            hint = h;
+            frame_result = try_decode_frame(&body, panel_width, panel_height);
+        }
+        Err(FetchError { message, refresh }) => {
+            hint = refresh;
+            frame_result = Err(message);
+        }
+    }
 
     // Success ⇒ use the server's `Refresh` hint if it sent one, else
-    // the long-form default. Error ⇒ short retry default so a
-    // transient issue gets another shot without the user pressing
-    // anything. `wakeup_requested` is an absolute `Instant` so the
-    // time we then spend on the panel refresh + UART flush is
-    // automatically subtracted from the sleep duration when we
-    // compute it below.
-    let (frame, wakeup_requested): (_, embassy_time::Instant) = match fetch_result {
-        Ok((frame, hint)) => {
+    // the long-form default. Error ⇒ also honour the hint if the
+    // server attached one to the error response, else fall back to
+    // the short retry default so a transient issue gets another shot
+    // without the user pressing anything. `wakeup_requested` is an
+    // absolute `Instant` so the time we then spend on the panel refresh
+    // + UART flush is automatically subtracted from the sleep duration
+    // when we compute it below.
+    let (frame, wakeup_requested): (_, embassy_time::Instant) = match frame_result {
+        Ok(frame) => {
             match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
                 // The server often sends relative URLs (e.g. just
                 // `/screen/foo`), so resolve against whatever we just
@@ -385,8 +396,14 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
             // error (e.g. a bad redirect committed last cycle), a
             // transient retry against the same URL would just loop.
             CURRENT_URL.clear();
-            let wakeup = embassy_time::Instant::now() + DEFAULT_ERROR_SLEEP;
-            (error_image::render(panel_width, panel_height, &msg), wakeup)
+            let wakeup = hint
+                .map(|h| h.refresh_time)
+                .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_ERROR_SLEEP);
+            let retry_in = wakeup.saturating_duration_since(embassy_time::Instant::now());
+            (
+                error_image::render(panel_width, panel_height, &msg, retry_in),
+                wakeup,
+            )
         }
     };
 
@@ -534,6 +551,27 @@ struct RefreshHint {
     url_override: Option<String>,
 }
 
+/// Error path from `try_fetch` (and its downstream decode pipeline).
+/// Early failures (DNS, TCP, request send) carry `refresh: None` since
+/// no headers were received. Failures after headers were parsed —
+/// non-2xx status, unexpected Content-Type, body-read errors — carry
+/// the parsed `Refresh:` hint so the error path can honour the
+/// server's retry interval the same way the success path does.
+#[derive(Debug)]
+struct FetchError {
+    message: String,
+    refresh: Option<RefreshHint>,
+}
+
+impl From<String> for FetchError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            refresh: None,
+        }
+    }
+}
+
 /// Parse a `Refresh: <secs>[; url=<url>]` header value into a
 /// `(Duration, Option<url>)`. Returns `None` for anything that doesn't
 /// start with a non-negative integer. The caller adds the `Duration`
@@ -572,7 +610,7 @@ fn parse_refresh_header(value: &str) -> Option<(embassy_time::Duration, Option<S
 async fn try_fetch<'t>(
     stack: embassy_net::Stack<'t>,
     url: &str,
-) -> Result<(Vec<u8>, Option<RefreshHint>), String> {
+) -> Result<(Vec<u8>, Option<RefreshHint>), FetchError> {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     let (host, port, path) = parse_http_url(url)?;
@@ -656,6 +694,13 @@ async fn try_fetch<'t>(
         )
     };
 
+    // From here on errors carry the parsed `Refresh:` hint so the
+    // caller can honour the server's retry interval on failures too.
+    let with_refresh_hint = |message: String| FetchError {
+        message,
+        refresh: refresh_hint.clone(),
+    };
+
     println!("Reading body");
     let mut body: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -665,12 +710,17 @@ async fn try_fetch<'t>(
             let n = body_reader
                 .read(&mut chunk)
                 .await
-                .map_err(|e| format!("HTTP read: {:?}", e))?;
+                .map_err(|e| with_refresh_hint(format!("HTTP read: {:?}", e)))?;
             if n == 0 {
                 break;
             }
-            body.try_reserve(n)
-                .map_err(|e| format!("OOM reading body at {} bytes: {:?}", body.len(), e))?;
+            body.try_reserve(n).map_err(|e| {
+                with_refresh_hint(format!(
+                    "OOM reading body at {} bytes: {:?}",
+                    body.len(),
+                    e
+                ))
+            })?;
             body.extend_from_slice(&chunk[..n]);
         }
     }
@@ -688,16 +738,16 @@ async fn try_fetch<'t>(
 
     if ct_base.is_some_and(|s| s.eq_ignore_ascii_case("text/plain")) {
         // text/plain is always an error surface, regardless of status code.
-        return Err(format!("HTTP {}: {}", status_code, body_str()));
+        return Err(with_refresh_hint(format!("HTTP {}: {}", status_code, body_str())));
     }
     if !(200..300).contains(&status_code) {
         // Only surface the body as text when the caller plausibly meant
         // it as a message (no Content-Type at all). Binary bodies on an
         // error status are just shown as the code.
-        return match ct_base {
-            None => Err(format!("HTTP {}: {}", status_code, body_str())),
-            Some(_) => Err(format!("HTTP {}", status_code)),
-        };
+        return Err(match ct_base {
+            None => with_refresh_hint(format!("HTTP {}: {}", status_code, body_str())),
+            Some(_) => with_refresh_hint(format!("HTTP {}", status_code)),
+        });
     }
     match ct_base {
         None => {}
@@ -705,10 +755,10 @@ async fn try_fetch<'t>(
             if s.eq_ignore_ascii_case("image/png")
                 || s.eq_ignore_ascii_case("application/octet-stream") => {}
         Some(_) => {
-            return Err(format!(
+            return Err(with_refresh_hint(format!(
                 "Unexpected Content-Type: {}",
                 content_type.as_deref().unwrap_or("")
-            ));
+            )));
         }
     }
 
