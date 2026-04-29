@@ -53,6 +53,24 @@ Implementation-wise: thread the planned wake `Instant` (or the
 extra line below the error text. Pairs naturally with the word-aware
 text wrapping TODO below, since the extra line wants the same wrapper.
 
+## Honour server `Refresh:` hint on error responses
+
+On the success path the device already uses the server's `Refresh:`
+header to schedule the next wake (`RefreshHint` parsed in
+`fetch_url_with_refresh`). On the error path it doesn't — `main_normal`
+unconditionally schedules `DEFAULT_ERROR_SLEEP` (10 min) at
+`src/bin/main.rs:388`, even if the server returned an error response
+that included a `Refresh:` header explicitly suggesting a different
+retry interval (e.g. "back off harder" or "try again sooner").
+
+The fetch helpers' `Err` variant is a plain `String` today, so the
+hint never reaches the caller. Either change the error type to
+`(String, Option<RefreshHint>)`, or refactor the fetch helpers to
+always return the hint alongside whatever they return (success body
+or error message). Then `main_normal`'s error arm picks
+`hint.unwrap_or(DEFAULT_ERROR_SLEEP)` the same way the success arm
+already does.
+
 ## Word-aware text wrapping for panel instructions + error frames
 
 Both `config_image::render` (the QR + instructions page) and
@@ -111,36 +129,38 @@ deep-sleep with RTC-IO wake and resume-on-next-boot) would save
 more — worth revisiting once we have battery-life measurements to
 justify the added complexity.
 
-## Panel-trait abstraction for multi-palette support
+## Battery sense — average multiple samples for less noise
 
-The `Gdep073e01` and `T133A01` drivers currently expose duplicate
-method surfaces that main.rs / config_mode.rs call through cfg-gated
-type aliases (`EpdPanel`, `use … as panel`). That works for the two
-Spectra-6 panels we ship today, but the E1001 (grayscale GDEY075T7,
-listed as "not implemented" in the README) has a different palette
-entirely — bolting it on would need yet another cfg arm in every
-caller.
+`battery::read_battery` enables the divider, settles for 10 ms, takes
+a single `adc.read_blocking` sample, and disables the divider. The
+reported voltage is visibly noisy cycle-to-cycle, which makes the
+percentage estimate jitter and could trip a "low battery" threshold
+spuriously.
 
-Consolidate by introducing a `Panel` trait that both drivers implement:
+Take multiple samples spread over a slightly longer window (e.g.
+8–16 reads spaced ~1 ms apart) and reduce — mean, or a median if
+we want to reject the occasional outlier — before applying the ÷2
+divider compensation. Keep the enable rail high for the whole
+window so each sample sees a settled divider.
 
-- Method surface: `reset`, `init`, `power_on`, `update_frame(impl
-  IntoIterator<Item = Self::PanelColor>)`, `display_frame_no_wait`,
-  `wait_until_idle`, `power_off`, plus the `panel_size()` and
-  `output_index_to_image_xy()` helpers lifted into associated
-  functions.
-- Associated type `PanelColor` that exposes:
-  - `const BLACK: Self` and `const WHITE: Self` (used by the error /
-    white-preflash paths),
-  - `fn all() -> impl Iterator<Item = Self>` (used by the PNG palette
-    quantiser to build a lookup table over every value the panel can
-    display),
-  - `fn to_rgb(self) -> [u8; 3]` (same, for closest-colour matching
-    against PNG palette entries).
+## E1001 driver
 
-That drops `EpdPanel` as a cfg-gated alias and lets main.rs / the
-image pipeline be generic over the panel. The E1001 driver then only
-needs to provide its own PanelColor (probably an 8-level grayscale
-enum) and slot in.
+The `Panel` / `PanelColor` traits in `src/panel.rs` already abstract
+the panel-model differences, so adding the E1001 (grayscale GDEY075T7,
+listed as "not implemented" in the README) is purely additive:
+
+- A grayscale colour type (probably a 4- or 8-level enum) with
+  `PanelColor` impl: `BLACK`, `WHITE`, `Default`, `all()`, `to_rgb`
+  reading from a calibrated palette.
+- A driver struct + `Panel<SPI>` impl analogous to `Gdep073e01`. No
+  EN pin needed — `enable`/`disable` stay no-ops (the existing driver
+  has none either).
+- A third arm in `hardware.rs`'s `EpdPanel` cfg cascade plus a third
+  cfg-gated `Output::new(...)` block in `main.rs` for the panel pins.
+
+The image pipeline in main.rs is already generic over `EpdPanel`,
+so no further consumer-side changes are needed — the new color type
+flows through `PanelColor::from_rgb` for the PNG quantiser path.
 
 ## E1004: investigate quad-SPI for panel data
 
