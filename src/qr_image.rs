@@ -10,16 +10,15 @@ use embedded_graphics::{
 };
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 
-/// Margin (in target-pixel units) left around the QR module grid when we
-/// centre it, so the code isn't right against the bezel and is easier
-/// for a phone camera to frame.
-const MARGIN_PX: u32 = 32;
-
 /// Encode `payload` as a QR code and draw it onto `target`. The QR is
-/// centred within `target.bounding_box()` and scaled to the largest
-/// integer pixel-per-module ratio that still leaves a `MARGIN_PX` margin.
-/// Each module is drawn as a solid square filled with `dark` ("on"
-/// modules) or `light` ("off" modules).
+/// anchored at the top-left of `target.bounding_box()` and scaled to
+/// the largest integer pixel-per-module ratio that fits. Each module
+/// is drawn as a solid square filled with `dark` ("on" modules) or
+/// `light` ("off" modules).
+///
+/// The caller is responsible for sizing the target so the desired
+/// padding around the QR is already accounted for; this routine just
+/// fills the box from the top-left.
 ///
 /// Returns `Ok(())` and draws nothing if the payload is too long for a
 /// `Version::MAX` QR code or the target is too small to fit one pixel per
@@ -51,17 +50,13 @@ where
     };
 
     let bbox = target.bounding_box();
-    let width = bbox.size.width;
-    let height = bbox.size.height;
     let qr_size = qr.size() as u32;
-    let usable = width.min(height).saturating_sub(MARGIN_PX * 2);
-    let scale = usable / qr_size;
+    let scale = bbox.size.width.min(bbox.size.height) / qr_size;
     if scale == 0 {
         return Ok(());
     }
-    let drawn = qr_size * scale;
-    let origin_x = bbox.top_left.x + ((width - drawn) / 2) as i32;
-    let origin_y = bbox.top_left.y + ((height - drawn) / 2) as i32;
+    let origin_x = bbox.top_left.x;
+    let origin_y = bbox.top_left.y;
 
     for my in 0..qr.size() {
         for mx in 0..qr.size() {

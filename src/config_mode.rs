@@ -63,7 +63,7 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     );
     let ap_mac_bytes = ap_mac.as_bytes();
     let ap_ssid = format!(
-        "reTerminal-setup-{:02X}{:02X}",
+        "epd-photoframe-setup-{:02X}{:02X}",
         ap_mac_bytes[4], ap_mac_bytes[5]
     );
     println!("AP SSID: {}", ap_ssid);
@@ -210,14 +210,13 @@ async fn panel_render_task(
     // whose phones don't surface the captive-portal popup automatically.
     let qr_payload = format!("WIFI:T:nopass;S:{};;", ap_ssid);
     let instructions = format!(
-        "reTerminal Setup\n\n\
-         Scan the QR code, or\n\
-         join WiFi:\n\
-         {}\n\n\
-         Then open:\n\
-         http://192.168.4.1/\n\n\
-         Press the {} to\n\
-         exit without saving.",
+        "epd-photoframe Setup\n\
+         \n\
+         Scan the QR code, or join WiFi: {}\n\
+         \n\
+         Then open: http://192.168.4.1/\n\
+         \n\
+         Press the {} to exit without saving.",
         ap_ssid, portal::REFRESH_BUTTON_LABEL
     );
     println!("Rendering config screen with QR: {}", qr_payload);
