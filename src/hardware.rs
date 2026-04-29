@@ -14,12 +14,22 @@ use crate::panel::Panel;
 
 #[cfg(feature = "e1002")]
 use crate::gdep073e01::Gdep073e01;
+#[cfg(feature = "e1001")]
+use crate::gdey075t7::Gdey075t7;
 #[cfg(feature = "e1004")]
 use crate::t133a01::T133A01;
 
-/// Fully-specialised type of the built panel driver. Both variants
+/// Fully-specialised type of the built panel driver. All variants
 /// implement the [`crate::panel::Panel`] trait so the rest of the firmware
 /// can drive the panel without caring which model it is.
+#[cfg(feature = "e1001")]
+pub type EpdPanel = Gdey075t7<
+    Spi<'static, esp_hal::Async>,
+    Output<'static>,
+    esp_hal::gpio::Input<'static>,
+    Output<'static>,
+    Output<'static>,
+>;
 #[cfg(feature = "e1002")]
 pub type EpdPanel = Gdep073e01<
     Spi<'static, esp_hal::Async>,

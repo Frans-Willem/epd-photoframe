@@ -23,7 +23,7 @@
 use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
 use embedded_hal_async::spi::SpiBus;
 
-pub trait PanelColor: PixelColor + Default {
+pub trait PanelColor: PixelColor {
     const BLACK: Self;
     const WHITE: Self;
 
@@ -78,10 +78,14 @@ pub trait Panel<SPI: SpiBus> {
     async fn power_on(&mut self, spi: &mut SPI) -> Result<(), Self::Error>;
     async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error>;
 
+    /// Stream `pixels` to the panel's frame buffer over SPI. The iterator
+    /// must be `Clone`-able so multi-pass formats (e.g. UC8179's two
+    /// 1bpp bit-planes for 4-level grayscale) can re-walk the same source
+    /// without buffering the whole frame.
     async fn update_frame(
         &mut self,
         spi: &mut SPI,
-        pixels: impl IntoIterator<Item = Self::Color>,
+        pixels: impl IntoIterator<Item = Self::Color> + Clone,
     ) -> Result<(), Self::Error>;
 
     /// Trigger a refresh and return immediately. Pair with

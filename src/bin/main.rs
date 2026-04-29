@@ -58,6 +58,8 @@ static REDIRECT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersist
 
 #[cfg(feature = "e1002")]
 use reterminal_e100x::gdep073e01::Gdep073e01;
+#[cfg(feature = "e1001")]
+use reterminal_e100x::gdey075t7::Gdey075t7;
 #[cfg(feature = "e1004")]
 use reterminal_e100x::t133a01::T133A01;
 
@@ -858,8 +860,9 @@ async fn main(spawner: Spawner) -> ! {
     // Bind semantic button names to the device-specific GPIOs. This is the
     // only place where the silkscreen-to-GPIO mapping appears; everything
     // downstream uses the `gpio_btn_*` handles (and their `.number()`) so
-    // the rest of main() is device-agnostic.
-    #[cfg(feature = "e1002")]
+    // the rest of main() is device-agnostic. E1001 inherits the E1002
+    // mapping (same hardware aside from the panel).
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
     let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
         (peripherals.GPIO3, peripherals.GPIO5, peripherals.GPIO4);
     #[cfg(feature = "e1004")]
@@ -961,7 +964,7 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
 
     // Status LED is on a different GPIO per device.
-    #[cfg(feature = "e1002")]
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
     let led_pin = peripherals.GPIO6;
     #[cfg(feature = "e1004")]
     let led_pin = peripherals.GPIO48;
@@ -1003,7 +1006,7 @@ async fn main(spawner: Spawner) -> ! {
     )
     .unwrap();
 
-    #[cfg(feature = "e1002")]
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
     let mut epd_spi_bus = epd_spi_bus
         .with_sck(peripherals.GPIO7)
         .with_mosi(peripherals.GPIO9)
@@ -1015,6 +1018,18 @@ async fn main(spawner: Spawner) -> ! {
         .with_miso(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO9)
         .into_async();
+
+    #[cfg(feature = "e1001")]
+    let mut epd = Gdey075t7::new(
+        &mut epd_spi_bus,
+        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
+        Input::new(
+            peripherals.GPIO13,
+            InputConfig::default().with_pull(Pull::Up),
+        ),
+        Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
+        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
+    );
 
     #[cfg(feature = "e1002")]
     let mut epd = Gdep073e01::new(

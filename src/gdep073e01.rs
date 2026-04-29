@@ -204,7 +204,7 @@ where
     async fn update_frame(
         &mut self,
         spi: &mut SPI,
-        pixels: impl IntoIterator<Item = Self::Color>,
+        pixels: impl IntoIterator<Item = Self::Color> + Clone,
     ) -> Result<(), Self::Error> {
         self.command(
             spi,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Flash + monitor helper.
 #
-# Usage: ./run.sh <e1002|e1004> <serial-port> <log-file>
+# Usage: ./run.sh <e1001|e1002|e1004> <serial-port> <log-file>
 # Example: ./run.sh e1002 /dev/ttyUSB1 /tmp/flash_e1002.log
 #
 # - Kills any still-running flash session for the same device
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
-    echo "usage: $0 <e1002|e1004> <serial-port> <log-file>" >&2
+    echo "usage: $0 <e1001|e1002|e1004> <serial-port> <log-file>" >&2
     exit 2
 fi
 
@@ -23,8 +23,8 @@ device="$1"
 port="$2"
 log="$3"
 
-if [[ "$device" != "e1002" && "$device" != "e1004" ]]; then
-    echo "error: device must be 'e1002' or 'e1004', got '$device'" >&2
+if [[ "$device" != "e1001" && "$device" != "e1002" && "$device" != "e1004" ]]; then
+    echo "error: device must be 'e1001', 'e1002', or 'e1004', got '$device'" >&2
     exit 2
 fi
 

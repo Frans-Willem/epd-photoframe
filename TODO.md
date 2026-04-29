@@ -110,6 +110,66 @@ To do, if we ever decide the per-palette closest-match cost matters:
 4. Restore the override in `src/spectra6.rs` with a test that pins the
    chosen thresholds.
 
+## E1001 4-gray waveform LUT — validate on hardware
+
+`src/gdey075t7.rs` currently ships 4-level grayscale with the LUT
+bytes from GxEPD2_4G v1.0.9. We have no on-hardware confirmation for
+that combination yet. Two open uncertainties to resolve when a real
+panel is in hand:
+
+**1. LUT length.** UC8179 datasheet (`/tmp/goodisplay/UC8179.pdf`,
+Command Description for R20H / R22H / R23H / R24H) documents LUTC,
+LUTKW, LUTWK, and LUTKK as 60-byte LUTs (10 groups × 6 bytes). We
+write only 42 bytes (7 groups) for those four. GxEPD2_4G is reportedly
+production-validated; the chip is presumably zero-padding the missing
+groups, but if hardware shows ghosting / banding the first thing to
+try is appending three `[0; 6]` groups to those four LUTs.
+
+**2. LUT bytes themselves and bit-mapping convention.** TRMNL firmware
+(`usetrmnl/trmnl-firmware` → `bitbank2/bb_epaper@2.1.7`) is
+*verified-good* on this panel by the user. Their bytes differ from
+ours in non-trivial ways:
+
+- LUT_BB byte 0: ours `0x80` vs TRMNL `0x40`.
+- LUT_BD entirely different (4 active phases for TRMNL vs 1 for us).
+- Phase-2/3/4 timings and amplitudes diverge meaningfully across the
+  six LUTs.
+- CDI register `0x50`: ours writes `0x31, 0x07`, TRMNL writes
+  `0x00, 0x07`.
+- **Bit-mapping convention is inverted**: ours (matching GxEPD2_4G)
+  packs the 2-bit gray code so `white = (high=1, low=1)`,
+  `black = (0, 0)`. TRMNL's bb_epaper packs the inverse:
+  `white = (0, 0)`, `black = (1, 1)`. The two are internally
+  consistent with their respective LUT waveforms — **cannot be mixed
+  piecemeal**.
+
+PANEL_SETTING (`0x00`) value is `0x3F` in both → matches ours ✓.
+
+Reference points for swap:
+
+- TRMNL `epd75_old_gray_init` (most likely match for plain non-D2
+  GDEY075T7) — `bitbank2/bb_epaper@2.1.7` in `src/bb_ep.inl` around
+  line 4550. For the GEN2 / GDEY075T7-D2 panel, TRMNL uses
+  `epd75_gray_init` which writes no LUTs and triggers OTP via
+  `0xE5 0x5F` (PSR `0x1F` + CDI `0x90, 0x07`).
+- TRMNL repo: `usetrmnl/trmnl-firmware` master @ commit `40dafef8`.
+
+To do, in order, when a real E1001 lands:
+
+1. Flash with the GxEPD2_4G LUTs as-is. Display a four-band
+   grayscale test pattern (Black / DarkGray / LightGray / White
+   vertical strips).
+2. If the four levels are visually distinct and clean — done.
+3. If output is *inverted* (whites are black, etc.) but otherwise
+   clean: that's the bit-mapping mismatch. Either flip our
+   `pack_plane` encoding *or* swap to TRMNL's LUTs — pick one
+   approach and stick with it.
+4. If output is recognisable but the gray levels are wrong / dirty:
+   try padding the four short LUTs to 60 bytes (option 1).
+5. If still wrong, swap LUT bytes + CDI value + bit-mapping
+   wholesale to TRMNL's `epd75_old_gray_init` (option 2). Confirm
+   visually, then keep whichever set works.
+
 ## SY6974B charger reporting on E1002 / E1001
 
 E1004 reads charger state from the SY6974B over I²C0 in `sensor_task`,
@@ -138,24 +198,23 @@ DTS values to match if we ever write to `REG02` / `REG04`:
 charge current 500 mA, charge voltage 4.208 V on E1001 / E1002 (the
 E1004 DTS lists 1000 mA — a different battery pack).
 
-## E1001 driver
+## E1001: 2-level B/W auto-detect
 
-The `Panel` / `PanelColor` traits in `src/panel.rs` already abstract
-the panel-model differences, so adding the E1001 (grayscale GDEY075T7,
-listed as "not implemented" in the README) is purely additive:
+The E1001 firmware currently always drives the panel in 4-level
+grayscale mode (UC8179 LUT-from-registers, two 1bpp planes uploaded
+sequentially via cmds `0x10` / `0x13`). When the server-emitted PNG
+only uses two distinct gray levels (pure black and white), we could
+fall back to the 1bpp B&W path: PSR `0x1F`, no custom LUTs, single
+plane upload. That's roughly half the SPI traffic and uses the
+panel's faster B&W refresh waveform from OTP.
 
-- A grayscale colour type (probably a 4- or 8-level enum) with
-  `PanelColor` impl: `BLACK`, `WHITE`, `Default`, `all()`, `to_rgb`
-  reading from a calibrated palette.
-- A driver struct + `Panel<SPI>` impl analogous to `Gdep073e01`. No
-  EN pin needed — `enable`/`disable` stay no-ops (the existing driver
-  has none either).
-- A third arm in `hardware.rs`'s `EpdPanel` cfg cascade plus a third
-  cfg-gated `Output::new(...)` block in `main.rs` for the panel pins.
+Detection: PNG palette has ≤ 2 entries that aren't both gray
+midtones. Cheap to check inside `try_decode_frame`. Switching modes
+mid-life means a second init sequence in the driver — could be an
+extra `init_1bpp` method on `Gdey075t7` plus a runtime mode flag, or
+two separate driver instances picked by the caller.
 
-The image pipeline in main.rs is already generic over `EpdPanel`,
-so no further consumer-side changes are needed — the new color type
-flows through `PanelColor::from_rgb` for the PNG quantiser path.
+Out of scope for the initial E1001 PR.
 
 ## E1004: investigate quad-SPI for panel data
 

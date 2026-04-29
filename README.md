@@ -31,12 +31,12 @@ must be enabled — there is no default):
 
 | Feature | Device      | Panel     | Resolution  | State       |
 |---------|-------------|-----------|-------------|-------------|
+| `e1001` | reTerminal E1001 (7")  | GDEY075T7  | 800×480 (4-level grayscale) | working    |
 | `e1002` | reTerminal E1002 (7")  | GDEP073E01 | 800×480  | working     |
 | `e1004` | reTerminal E1004 (13") | T133A01   | 1200×1600 | working     |
-| —       | reTerminal E1001 (7")  | GDEY075T7 | 800×480 (grayscale) | not implemented |
 
-Both panel driver modules are always compiled regardless of the selected
-feature so changes surface compile errors in both.
+All three panel driver modules are always compiled regardless of the
+selected feature, so changes surface compile errors in every driver.
 
 Progress
 --------

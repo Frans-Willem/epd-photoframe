@@ -10,6 +10,7 @@ path = "./src/bin/main.rs"
 
 [features]
 # Select exactly one device. Each device selects its panel driver and pinout.
+e1001 = [] # Seeed reTerminal E1001 (7", GDEY075T7 panel, 800x480 4-level grayscale)
 e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
 e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
 

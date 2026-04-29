@@ -29,12 +29,12 @@ use esp_println::println;
 pub const PASSWORD_SENTINEL: &str =
     "___________________________unchanged___________________________unchanged___________________________";
 
-/// Device-specific label for the Refresh button — on the E1002 it's the
-/// unmarked green button, so we spell that out in the instructions; on
-/// the E1004 the button is clearly iconed and needs no qualifier. Used
-/// both in the portal HTML and in the panel instructions rendered by
-/// `config_mode`.
-#[cfg(feature = "e1002")]
+/// Device-specific label for the Refresh button — on the E1001 / E1002
+/// it's the unmarked green button, so we spell that out in the
+/// instructions; on the E1004 the button is clearly iconed and needs
+/// no qualifier. Used both in the portal HTML and in the panel
+/// instructions rendered by `config_mode`.
+#[cfg(any(feature = "e1001", feature = "e1002"))]
 pub const REFRESH_BUTTON_LABEL: &str = "Refresh button (green)";
 #[cfg(feature = "e1004")]
 pub const REFRESH_BUTTON_LABEL: &str = "Refresh button";
