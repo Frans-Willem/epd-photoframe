@@ -23,14 +23,17 @@ const RECONFIGURE_HINT: &str =
 
 /// Render `message` as black text on a white frame of the given dimensions
 /// in the panel's colour space, returning the frame as a row-major
-/// `Vec<C>`. Appends a "Will retry in …" line plus the reconfigure hint
-/// below the caller's message — callers should supply only the
-/// failure-specific part.
+/// `Vec<C>`. Appends the reconfigure hint below the caller's message,
+/// and — when `retry_in` is `Some` — a "Will retry in …" line between
+/// the two. Callers on the transient-failure path pass `Some(duration)`
+/// so the user knows when the device will try again on its own; the
+/// panic-render path passes `None` because that boot intentionally
+/// doesn't reschedule (it deep-sleeps until a button press).
 pub fn render<C: PanelColor>(
     width: usize,
     height: usize,
     message: &str,
-    retry_in: Duration,
+    retry_in: Option<Duration>,
 ) -> Vec<C> {
     let mut canvas = Canvas::<C>::new(width as u32, height as u32, C::WHITE);
     let style = MonoTextStyle::new(&FONT_10X20, C::BLACK);
@@ -47,15 +50,17 @@ pub fn render<C: PanelColor>(
     canvas.into_vec()
 }
 
-fn build_text(message: &str, retry_in: Duration) -> String {
+fn build_text(message: &str, retry_in: Option<Duration>) -> String {
     let mut s = String::from(message);
     if !s.ends_with('\n') {
         s.push('\n');
     }
     s.push('\n');
-    s.push_str(&format_retry(retry_in));
-    s.push('\n');
-    s.push('\n');
+    if let Some(d) = retry_in {
+        s.push_str(&format_retry(d));
+        s.push('\n');
+        s.push('\n');
+    }
     s.push_str(RECONFIGURE_HINT);
     s
 }

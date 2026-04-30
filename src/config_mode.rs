@@ -199,6 +199,9 @@ async fn panel_render_task(
     let frame =
         config_image::render::<EpdColor>(panel_width, panel_height, &qr_payload, &instructions);
 
+    // Bring the panel's enable rail up before any panel I/O.
+    // Idempotent — fine if the white pre-flash already raised it.
+    epd.enable().await.unwrap();
     println!("Reset");
     epd.reset().await.unwrap();
     println!("Wait until idle");

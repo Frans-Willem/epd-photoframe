@@ -1,5 +1,36 @@
 # TODO
 
+## Pull in the new Spectra-6 palette from `epd-dither`
+
+`src/spectra6.rs` carries `SPECTRA_6_PALETTE` (the panel-anchor RGB
+values used as the closest-match targets for `Spectra6Color::from_rgb`)
+and the saturated reference set. The `epd-dither` repository has since
+landed an updated palette — measured/tuned against newer panels — that
+should produce better colour matching on the E1002 / E1004.
+
+Bring the new constants in and replace `SPECTRA_6_PALETTE`. Verify
+on-hardware against a known reference image (e.g. a six-band test
+strip) that the closest-match outputs improved. The
+`SPECTRA_6_PALETTE_SATURATED` set may or may not need updating in
+parallel — check what the dither repo treats as its "saturated" anchors.
+
+## Config-mode hold timer should count from boot, not after the white flash
+
+Currently `main()` does `epd.enable()` → white pre-flash (which on
+Timer wakes is skipped, but on every other wake runs a non-blocking
+"send the white frame, return immediately" sequence) → then races a
+10-second timer against `wait_for_high()` on Previous + Next. The 10
+s window therefore starts *after* the pre-flash setup work, which on
+some wakes is a non-trivial fraction of a second and shifts the
+deadline relative to "when the user pressed the buttons".
+
+Anchor the deadline to power-on instead: take an `embassy_time::Instant`
+right at the top of `main()` (before any panel I/O), then race
+`Timer::at(boot_instant + Duration::from_secs(10))` instead of
+`Timer::after(Duration::from_secs(10))`. The user's perceived hold
+duration becomes "10 seconds since the LED started blinking", which
+matches their intuition.
+
 ## Static-IP + explicit WPA auth-type configuration
 
 The current NVS schema stores just the three fields the portal form
@@ -346,6 +377,68 @@ peripherals-ownership story would get a bit hand-wavy. Worth
 looking at what `esp_hal::uart::UartTx::new` actually does to see
 whether splitting the registers / using the existing `Uart` type
 alongside esp-println is explicitly supported.
+
+## `read_and_clear_rtc_gpio_wake_status` extraction
+
+The PAC-poking helper still lives in `src/bin/main.rs`. With
+`crate::uart::wait_for_tx_idle` already extracted as the first member
+of a "low-level helper" cluster, this function is the obvious second
+inhabitant — likely under `src/rtc_io.rs`. Worth doing once a second
+caller materialises; right now it has only one user, so leaving it in
+`main.rs` matches the "no shared module for a single value" rule.
+
+## Validate config-mode settings before persisting them
+
+When the user submits the portal form, `config_mode::run` writes
+`wifi.ssid` / `wifi.pass` / `image.url` to NVS and reboots — the only
+feedback they get that *anything* is wrong with the values is the
+device booting straight into an error frame after the next cycle's
+WiFi attempt fails. Pre-flight the new values *before* persisting so
+the form can re-render with a useful message instead.
+
+Suggested order (each step short-circuits on failure):
+
+1. Try to associate with the new SSID/password using
+   `single_shot_wifi::run`. If it errors out, surface "couldn't
+   connect: …" in the form.
+2. With WiFi up, do an HTTP GET against the supplied `image.url`,
+   following the `try_fetch` classification (status code,
+   `Content-Type`, `text/plain` = error message).
+3. Run `try_decode_frame` on the body to confirm it's a panel-sized
+   indexed PNG with a bit depth we accept. A successful decode is the
+   strongest signal the URL is wired up correctly.
+
+Only persist + reboot if all three pass; otherwise re-render the form
+with the failing-step message inlined. The validation reuses
+`crate::single_shot_wifi`, `crate::normal_mode::try_fetch`, and
+`crate::normal_mode::try_decode_frame` — `try_fetch` /
+`try_decode_frame` are currently `pub(crate)`-private to
+`normal_mode`, so this entry implies promoting them to `pub(crate)`
+exports.
+
+## Reorganise panel drivers under `src/panel/`
+
+`panel.rs` is the trait module and lives next to four sibling files
+that all `impl` it (`gdep073e01.rs`, `gdey075t7.rs`, `t133a01.rs`, plus
+the colour-space helpers `spectra6.rs` and `grayscale.rs`). Promote
+`panel.rs` to `src/panel/mod.rs` and pull each driver in alongside it:
+
+```
+src/panel/
+  mod.rs          (the `Panel` / `PanelColor` traits — was `panel.rs`)
+  gdep073e01.rs   (E1002)
+  gdey075t7.rs    (E1001)
+  t133a01.rs      (E1004)
+  spectra6.rs     (E1002 / E1004 colour space)
+  grayscale.rs    (E1001 4-level Gray2 helper)
+```
+
+Update `lib.rs` to expose the submodules through `pub mod panel;` plus
+`pub use panel::{gdep073e01, gdey075t7, t133a01, spectra6, grayscale};`
+(or rewrite the dependents to use the `crate::panel::…` paths
+directly). Behaviour is identical; this is a directory-layout
+cleanup that keeps the lib root from accumulating a long flat list of
+panel-specific modules.
 
 ## Drop `[patch.crates-io]` pins once upstream releases land
 

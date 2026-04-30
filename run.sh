@@ -52,5 +52,13 @@ source "$HOME/export-esp.sh"
 # Record the PID and `exec` into `script`, so this shell process is
 # replaced by `script` (PID stays the same) and the wrapper blocks in
 # the foreground until `script` exits.
+#
+# `RELEASE=1` env var swaps in the release profile — needed when
+# exercising release-only behaviour (e.g. the panic-to-screen path
+# that's gated on `cfg(not(debug_assertions))`).
+release_flag=""
+if [[ "${RELEASE:-}" == "1" ]]; then
+    release_flag="--release"
+fi
 echo $$ > "$pid_file"
-exec script -qfc "cargo run --features $device -- --port $port" "$log"
+exec script -qfc "cargo run $release_flag --features $device -- --port $port" "$log"
