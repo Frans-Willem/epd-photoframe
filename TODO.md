@@ -170,29 +170,44 @@ To do, in order, when a real E1001 lands:
    wholesale to TRMNL's `epd75_old_gray_init` (option 2). Confirm
    visually, then keep whichever set works.
 
-## SY6974B charger reporting on E1002 / E1001
+## SY6974B charger reporting on E1001 / E1002 (BLOCKED — chip silent on bus)
 
-E1004 reads charger state from the SY6974B over I²C0 in `sensor_task`,
-and the URL-builder appends `power=` only when that read is `Some`. The
-cfg gate is currently `#[cfg(feature = "e1004")]`, with E1002 (and
-prospectively E1001) opting out.
+The plumbing for this — bringing up I²C1 on GPIO39/40, sharing both
+buses via `Arc<Mutex<I2c>>` + `embassy_embedded_hal`'s `I2cDevice`,
+running the charger read on all three devices — landed on branch
+`experiment/sy6974b-i2c` along with a one-shot bus-scan diagnostic.
 
-Per the Zephyr device trees for both 7" reTerminals
-([E1001](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1001/reterminal_e1001_procpu.dts),
-[E1002](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1002/reterminal_e1002_procpu.dts)),
-both devices carry a SY6974B at `i2c1 0x6B` — the difference vs E1004
-isn't "no charger", it's "different bus": E1004 puts the charger on
-I²C0 (already up for the SHT40), while E1001 / E1002 put it on I²C1
-(GPIO39 SDA / GPIO40 SCL, currently not initialised by the firmware).
+On bench testing, the SY6974B does not respond on either E1001 or
+E1002 at any address from `0x08..=0x77`, even after dropping I²C1 to
+10 kHz. I²C0 sensors (SHT40 `0x44` + PCF8563 RTC `0x51`) respond
+fine on the same software path. Pinout (GPIO39 SDA / GPIO40 SCL)
+verified against the schematic. ESP32-S3 internal pull-ups are on
+by default in esp-hal 1.1.0.
 
-To do:
+Open hypotheses (in priority order):
 
-1. Bring up I²C1 in `main()` alongside the existing I²C0 init; make
-   `sensor_task` accept both buses.
-2. Move the SY6974B read off I²C0 onto I²C1 for E1001 / E1002. E1004 stays
-   on I²C0 — same driver, different bus instance.
-3. Drop the `#[cfg(feature = "e1004")]` gate around the charger
-   read; populate `POWER_STATUS` on all three devices.
+1. **Trace continuity.** ESP32 GPIO39/40 → SY6974B SDA/SCL may not
+   be a direct connection. Could be a missing 0Ω jumper, unstuffed
+   series resistor, analog mux, or level shifter that needs an
+   enable. Probe SDA at the chip pad during a scan to see whether
+   master-side wiggles reach the IC.
+2. **Shipping mode.** BQ-family parts ship with a low-power latch
+   that ignores I²C until VBUS is applied directly to the charger's
+   input pin or QON is pulsed low for >2 s. If USB on this board
+   only powers the ESP32 (via USB-UART) and the charger has its own
+   VBUS path that needs separate power, the chip never wakes.
+3. **CE / chip-enable held HIGH from boot.** Some BQ variants gate
+   I²C off when CE is not asserted. Trace CE on the schematic; if
+   it's on a GPIO, drive it low before scanning.
+4. **External pull-up strength.** Internal ~45 kΩ pull-ups are
+   weak; I²C norm is 4.7-10 kΩ external. 10 kHz scan still found
+   nothing, which mostly rules this out, but it could compound
+   another issue at higher speeds.
+
+To pick this back up: cherry-pick or rebase `experiment/sy6974b-i2c`,
+resolve the hardware question, then drop the diagnostic scan + the
+10 kHz I²C1 clock (both flagged with `TEMP:` comments in that
+branch).
 
 DTS values to match if we ever write to `REG02` / `REG04`:
 charge current 500 mA, charge voltage 4.208 V on E1001 / E1002 (the
