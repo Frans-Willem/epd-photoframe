@@ -26,8 +26,7 @@ use esp_println::println;
 /// 8–63 printable ASCII (or exactly 64 hex chars), so anything longer
 /// than 64 provably *isn't* a passphrase — anything longer that's
 /// *not* the sentinel is therefore a malformed submission.
-pub const PASSWORD_SENTINEL: &str =
-    "___________________________unchanged___________________________unchanged___________________________";
+pub const PASSWORD_SENTINEL: &str = "___________________________unchanged___________________________unchanged___________________________";
 
 /// Device-specific label for the Refresh button — on the E1001 / E1002
 /// it's the unmarked green button, so we spell that out in the
@@ -362,12 +361,7 @@ fn url_decode(s: &str) -> String {
 /// concurrent handler tasks cover phones that pipeline captive-portal
 /// probes without burning too much RAM on buffers.
 #[embassy_executor::task]
-pub async fn web_task(
-    stack: Stack<'static>,
-    ssid: String,
-    url: String,
-    password_is_set: bool,
-) {
+pub async fn web_task(stack: Stack<'static>, ssid: String, url: String, password_is_set: bool) {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use edge_nal::TcpBind;

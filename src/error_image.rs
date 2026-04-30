@@ -79,10 +79,6 @@ fn format_retry(d: Duration) -> String {
         )
     } else {
         let h = (secs + 1800) / 3600;
-        format!(
-            "Will retry in {} hour{}.",
-            h,
-            if h == 1 { "" } else { "s" }
-        )
+        format!("Will retry in {} hour{}.", h, if h == 1 { "" } else { "s" })
     }
 }

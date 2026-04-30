@@ -31,10 +31,7 @@ pub async fn read_temp_humidity(i2c: &mut I2c<'static, Async>) -> Option<TempHum
         Ok(m) => {
             let temperature_c = m.temperature_celsius();
             let humidity_pct = m.humidity_percent();
-            println!(
-                "SHT40: {:.2} °C, {:.2} % RH",
-                temperature_c, humidity_pct
-            );
+            println!("SHT40: {:.2} °C, {:.2} % RH", temperature_c, humidity_pct);
             Some(TempHumidity {
                 temperature_c,
                 humidity_pct,

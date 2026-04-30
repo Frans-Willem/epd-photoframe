@@ -153,4 +153,3 @@ fn checksum<T>(p: &MaybeUninit<T>) -> u32 {
         unsafe { core::slice::from_raw_parts(p.as_ptr().cast::<u8>(), core::mem::size_of::<T>()) };
     esp_hal::rom::crc::crc32_le(0, bytes)
 }
-

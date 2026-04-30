@@ -15,6 +15,7 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::spi::master::Spi;
 use esp_println::println;
 
+use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::config_image;
 use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
@@ -58,9 +59,8 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // derive a user-recognisable SSID suffix from its last two bytes.
     // Constructing the controller with `initial_config` configures and
     // starts the radio; dropping it stops it. ---
-    let ap_mac = esp_hal::efuse::interface_mac_address(
-        esp_hal::efuse::InterfaceMacAddress::AccessPoint,
-    );
+    let ap_mac =
+        esp_hal::efuse::interface_mac_address(esp_hal::efuse::InterfaceMacAddress::AccessPoint);
     let ap_mac_bytes = ap_mac.as_bytes();
     let ap_ssid = format!(
         "epd-photoframe-setup-{:02X}{:02X}",
@@ -101,9 +101,7 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     spawner.spawn(net_task(net_runner).unwrap());
     spawner.spawn(dhcp_server_task(net_stack).unwrap());
     spawner.spawn(dns_hijack_task(net_stack).unwrap());
-    spawner.spawn(
-        portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap(),
-    );
+    spawner.spawn(portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap());
 
     // Hand the panel rendering off to its own task — composing the QR
     // + instructions bitmap and driving the ~20 s e-ink refresh all run
@@ -124,10 +122,8 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // still incomplete and we re-enter config mode for a retry. Either
     // beats silently hanging after the user hit "Save".
     println!("Config mode ready — awaiting save or Refresh press.");
-    let mut refresh_input = Input::new(
-        gpio_btn_refresh,
-        InputConfig::default().with_pull(Pull::Up),
-    );
+    let mut refresh_input =
+        Input::new(gpio_btn_refresh, InputConfig::default().with_pull(Pull::Up));
     let decision = embassy_futures::select::select(
         portal::SAVE_SIGNAL.wait(),
         wait_for_press(&mut refresh_input, Duration::from_millis(50)),
@@ -158,7 +154,6 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
             }
             // Give the HTTP response a moment to flush before we reboot.
             Timer::after(Duration::from_millis(500)).await;
-
         }
         embassy_futures::select::Either::Second(()) => {
             println!("Refresh pressed — leaving config mode without saving.");
@@ -167,26 +162,6 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
 
     println!("Rebooting");
     esp_hal::system::software_reset();
-}
-
-/// Wait for an active-low button to be held for at least `hold_duration`.
-/// Electrical / contact-bounce blips that release before the duration
-/// elapses are filtered out (the wait_for_high race wins and we loop
-/// back to `wait_for_low`). Useful when we've just enabled a pull-up
-/// and the rails are still settling.
-async fn wait_for_press(input: &mut Input<'_>, hold_duration: Duration) {
-    loop {
-        input.wait_for_low().await;
-        match embassy_futures::select::select(
-            Timer::after(hold_duration),
-            input.wait_for_high(),
-        )
-        .await
-        {
-            embassy_futures::select::Either::First(()) => return,
-            embassy_futures::select::Either::Second(()) => continue,
-        }
-    }
 }
 
 #[embassy_executor::task]
@@ -217,7 +192,8 @@ async fn panel_render_task(
          Then open: http://192.168.4.1/\n\
          \n\
          Press the {} to exit without saving.",
-        ap_ssid, portal::REFRESH_BUTTON_LABEL
+        ap_ssid,
+        portal::REFRESH_BUTTON_LABEL
     );
     println!("Rendering config screen with QR: {}", qr_payload);
     let frame =
@@ -256,7 +232,10 @@ async fn ap_wifi_task(controller: esp_radio::wifi::WifiController<'static>) {
     loop {
         // Log association events as they come in; they're useful for
         // verifying a phone actually joined the portal network.
-        match controller.wait_for_access_point_connected_event_async().await {
+        match controller
+            .wait_for_access_point_connected_event_async()
+            .await
+        {
             Ok(esp_radio::wifi::AccessPointStationEventInfo::Connected(info)) => {
                 println!("AP: station connected: {:?}", info);
             }

@@ -11,6 +11,7 @@ compile_error!("features `e1002` and `e1004` are mutually exclusive");
 compile_error!("enable one of the device features: `e1001`, `e1002`, or `e1004`");
 
 pub mod battery;
+pub mod button;
 pub mod buzzer;
 pub mod canvas;
 pub mod config;

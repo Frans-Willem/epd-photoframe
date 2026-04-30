@@ -29,6 +29,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use reterminal_e100x::button::wait_for_press;
 use reterminal_e100x::config::Config;
 use reterminal_e100x::config_mode;
 use reterminal_e100x::error_image;
@@ -55,6 +56,16 @@ const STORED_URL_MAX: usize = 512;
 static CURRENT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersisted::new();
 #[esp_hal::ram(unstable(rtc_slow, persistent))]
 static REDIRECT_URL: RtcPersisted<heapless::String<STORED_URL_MAX>> = RtcPersisted::new();
+
+// When a button is pressed *during* the panel refresh wait, we abort
+// the refresh, stash the resulting action here, and software-reset.
+// On the next boot, this slot overrides the wake-reason-derived action,
+// so the user gets exactly the action they pressed even though we
+// didn't go through deep-sleep + RTC-IO wake. RTC-slow RAM survives
+// software reset (the RTC domain isn't reset) but is zero on cold
+// boot — `RtcPersisted`'s magic gate handles that.
+#[esp_hal::ram(unstable(rtc_slow, persistent))]
+static PENDING_ACTION: RtcPersisted<WakeAction> = RtcPersisted::new();
 
 #[cfg(feature = "e1002")]
 use reterminal_e100x::gdep073e01::Gdep073e01;
@@ -108,11 +119,29 @@ fn read_and_clear_rtc_gpio_wake_status(mask: u32) -> u32 {
 }
 
 fn determine_wake_action(
+    reset_reason: Option<esp_hal::rtc_cntl::SocResetReason>,
     wake_reason: SleepSource,
     refresh_latched: bool,
     previous_latched: bool,
     next_latched: bool,
 ) -> WakeAction {
+    // A `CoreSw` reset paired with a populated `PENDING_ACTION` slot is
+    // the abort-during-refresh handoff from `main_normal`. Honour it
+    // and short-circuit. Any other reset reason clears the slot so a
+    // value left behind by a previous abort can't leak through if the
+    // following soft reset never happened (e.g. brownout / watchdog).
+    if reset_reason == Some(esp_hal::rtc_cntl::SocResetReason::CoreSw) {
+        if let Some(action) = PENDING_ACTION.take() {
+            println!(
+                "Resuming with pending action {:?} from previous cycle",
+                action
+            );
+            return action;
+        }
+    } else {
+        PENDING_ACTION.clear();
+    }
+
     match wake_reason {
         SleepSource::Undefined => WakeAction::FreshBoot,
         SleepSource::Timer => WakeAction::Timer,
@@ -154,7 +183,8 @@ const WIFI_LINK_TIMEOUT: Duration = Duration::from_secs(30);
 /// doesn't send a `Refresh` header. E-ink is fine with hours-scale
 /// refreshes and most dashboard content doesn't change faster than
 /// that; the server can override on a per-response basis.
-const DEFAULT_SUCCESS_SLEEP: embassy_time::Duration = embassy_time::Duration::from_secs(4 * 60 * 60);
+const DEFAULT_SUCCESS_SLEEP: embassy_time::Duration =
+    embassy_time::Duration::from_secs(4 * 60 * 60);
 
 /// Deep-sleep duration on the error path. Shorter than success so a
 /// transient failure (WiFi glitch, server hiccup) recovers on the next
@@ -328,17 +358,13 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 // `/screen/foo`), so resolve against whatever we just
                 // fetched rather than the NVS base.
                 Some(raw) => match reterminal_e100x::url_util::resolve(&current_url, raw) {
-                    Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str())
-                    {
+                    Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str()) {
                         Ok(stored) => {
                             println!("Stashing redirect URL for next Timer wake: {}", abs);
                             REDIRECT_URL.set(stored);
                         }
                         Err(heapless::CapacityError { .. }) => {
-                            println!(
-                                "Redirect URL too long ({} bytes); dropping",
-                                abs.len()
-                            );
+                            println!("Redirect URL too long ({} bytes); dropping", abs.len());
                             REDIRECT_URL.clear();
                         }
                     },
@@ -376,28 +402,81 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     };
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
-    println!("Reset");
-    epd.reset().await.unwrap();
-    println!("Wait until idle");
-    epd.wait_until_idle().await.unwrap();
-    println!("Init");
-    epd.init(&mut spi_bus).await.unwrap();
-    println!("Power on");
-    epd.power_on(&mut spi_bus).await.unwrap();
-    println!("Update frame");
-    let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = EpdPanel::output_index_to_image_xy(idx);
-        frame[y * panel_width + x]
-    });
-    epd.update_frame(&mut spi_bus, data).await.unwrap();
-    println!("Trigger refresh");
-    epd.display_frame_no_wait(&mut spi_bus).await.unwrap();
-    println!("Wait until idle (~20s refresh)");
-    epd.wait_until_idle().await.unwrap();
+    //
+    // The whole panel sequence — reset → init → power_on →
+    // update_frame → display_frame_no_wait → wait_until_idle →
+    // power_off → disable — is wrapped in an async block and raced
+    // against the three buttons. A press during *any* of those steps
+    // (not just the long wait in the middle) aborts the panel via a
+    // fresh `reset()`, stashes the chosen action in RTC-slow RAM, and
+    // software-resets the device. The next boot's
+    // `determine_wake_action` picks up `PENDING_ACTION` and resumes
+    // with that action, the same way it would for a deep-sleep wake.
+    let panel_update = async {
+        println!("Reset");
+        epd.reset().await.unwrap();
+        println!("Wait until idle");
+        epd.wait_until_idle().await.unwrap();
+        println!("Init");
+        epd.init(&mut spi_bus).await.unwrap();
+        println!("Power on");
+        epd.power_on(&mut spi_bus).await.unwrap();
+        println!("Update frame");
+        let data = (0..(panel_width * panel_height)).map(|idx| {
+            let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+            frame[y * panel_width + x]
+        });
+        epd.update_frame(&mut spi_bus, data).await.unwrap();
+        println!("Trigger refresh");
+        epd.display_frame_no_wait(&mut spi_bus).await.unwrap();
+        println!("Wait until idle (~20s refresh)");
+        epd.wait_until_idle().await.unwrap();
+        println!("Power off");
+        epd.power_off(&mut spi_bus).await.unwrap();
+    };
 
-    println!("Power off");
-    epd.power_off(&mut spi_bus).await.unwrap();
+    const BUTTON_DEBOUNCE: Duration = Duration::from_millis(50);
+    let interrupted: Option<WakeAction> = {
+        let mut refresh_in = Input::new(
+            gpio_btn_refresh.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut previous_in = Input::new(
+            gpio_btn_previous.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        let mut next_in = Input::new(
+            gpio_btn_next.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        use embassy_futures::select::{Either4, select4};
+        match select4(
+            panel_update,
+            wait_for_press(&mut refresh_in, BUTTON_DEBOUNCE),
+            wait_for_press(&mut previous_in, BUTTON_DEBOUNCE),
+            wait_for_press(&mut next_in, BUTTON_DEBOUNCE),
+        )
+        .await
+        {
+            Either4::First(()) => None,
+            Either4::Second(()) => Some(WakeAction::Refresh),
+            Either4::Third(()) => Some(WakeAction::Previous),
+            Either4::Fourth(()) => Some(WakeAction::Next),
+        }
+    };
+    // Always de-assert the power to the panel, either update completed or interrupted
     epd.disable().await.unwrap();
+
+    if let Some(action) = interrupted {
+        println!(
+            "Button {:?} pressed during refresh; aborting + soft-resetting",
+            action
+        );
+        epd.reset().await.unwrap();
+        PENDING_ACTION.set(action);
+        wait_for_uart_tx_idle();
+        esp_hal::system::software_reset();
+    }
 
     println!("Done");
     let _ = epd;
@@ -564,9 +643,16 @@ fn parse_refresh_header(value: &str) -> Option<(embassy_time::Duration, Option<S
         } else {
             v
         };
-        if v.is_empty() { None } else { Some(String::from(v)) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(String::from(v))
+        }
     });
-    Some((embassy_time::Duration::from_secs(interval_secs), url_override))
+    Some((
+        embassy_time::Duration::from_secs(interval_secs),
+        url_override,
+    ))
 }
 
 /// Fetch the body of `url` over HTTP and parse the `Refresh:` header
@@ -683,11 +769,7 @@ async fn try_fetch<'t>(
                 break;
             }
             body.try_reserve(n).map_err(|e| {
-                with_refresh_hint(format!(
-                    "OOM reading body at {} bytes: {:?}",
-                    body.len(),
-                    e
-                ))
+                with_refresh_hint(format!("OOM reading body at {} bytes: {:?}", body.len(), e))
             })?;
             body.extend_from_slice(&chunk[..n]);
         }
@@ -706,7 +788,11 @@ async fn try_fetch<'t>(
 
     if ct_base.is_some_and(|s| s.eq_ignore_ascii_case("text/plain")) {
         // text/plain is always an error surface, regardless of status code.
-        return Err(with_refresh_hint(format!("HTTP {}: {}", status_code, body_str())));
+        return Err(with_refresh_hint(format!(
+            "HTTP {}: {}",
+            status_code,
+            body_str()
+        )));
     }
     if !(200..300).contains(&status_code) {
         // Only surface the body as text when the caller plausibly meant
@@ -902,8 +988,13 @@ async fn main(spawner: Spawner) -> ! {
     let previous_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_previous.number())) != 0;
     let next_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_next.number())) != 0;
 
-    let wake_action =
-        determine_wake_action(wake_reason, refresh_latched, previous_latched, next_latched);
+    let wake_action = determine_wake_action(
+        reset_reason,
+        wake_reason,
+        refresh_latched,
+        previous_latched,
+        next_latched,
+    );
 
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
     let time_since_boot = rtc.time_since_power_up();
@@ -968,9 +1059,7 @@ async fn main(spawner: Spawner) -> ! {
     let led_pin = peripherals.GPIO6;
     #[cfg(feature = "e1004")]
     let led_pin = peripherals.GPIO48;
-    spawner.spawn(
-        blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap(),
-    );
+    spawner.spawn(blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap());
 
     // One task that drives both per-wake sensor reads (battery ADC +
     // SHT40 over I²C0) concurrently via `join`. By the time the URL
@@ -978,14 +1067,12 @@ async fn main(spawner: Spawner) -> ! {
     // populated — the 10 ms ADC settle + the 10 ms SHT40 conversion
     // happen alongside the ~1.3 s WiFi association, so the `wait()`s
     // are essentially free.
-    let i2c0 = esp_hal::i2c::master::I2c::new(
-        peripherals.I2C0,
-        esp_hal::i2c::master::Config::default(),
-    )
-    .unwrap()
-    .with_sda(peripherals.GPIO19)
-    .with_scl(peripherals.GPIO20)
-    .into_async();
+    let i2c0 =
+        esp_hal::i2c::master::I2c::new(peripherals.I2C0, esp_hal::i2c::master::Config::default())
+            .unwrap()
+            .with_sda(peripherals.GPIO19)
+            .with_scl(peripherals.GPIO20)
+            .into_async();
     spawner.spawn(
         sensor_task(
             Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
@@ -1128,10 +1215,7 @@ async fn main(spawner: Spawner) -> ! {
         gpio_btn_next: gpio_btn_next.degrade(),
         spi_bus: epd_spi_bus,
         epd,
-        buzzer: reterminal_e100x::buzzer::Buzzer::new(
-            peripherals.LEDC,
-            peripherals.GPIO45,
-        ),
+        buzzer: reterminal_e100x::buzzer::Buzzer::new(peripherals.LEDC, peripherals.GPIO45),
     };
 
     if let Some(creds) = creds

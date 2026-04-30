@@ -35,10 +35,7 @@ impl Buzzer {
     /// 0 % duty (silent). `Buzzer::new` may only be called once per
     /// boot — the timer is leaked into a `StaticCell` so the channel
     /// can hold a 'static reference to it.
-    pub fn new(
-        ledc_peripheral: LEDC<'static>,
-        output_pin: impl PeripheralOutput<'static>,
-    ) -> Self {
+    pub fn new(ledc_peripheral: LEDC<'static>, output_pin: impl PeripheralOutput<'static>) -> Self {
         static PWM_TIMER: StaticCell<LedcTimer<'static, LowSpeed>> = StaticCell::new();
 
         let mut ledc = Ledc::new(ledc_peripheral);
