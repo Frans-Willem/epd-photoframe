@@ -35,6 +35,17 @@ use reterminal_e100x::error_image;
 use reterminal_e100x::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
 use reterminal_e100x::panel::{Panel, PanelColor};
 use reterminal_e100x::rtc_persisted::RtcPersisted;
+use alloc::sync::Arc;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
+
+/// An I²C bus shared between concurrent users via an async mutex. Each
+/// `I2cDevice` view of the bus internally `.lock().await`s for the
+/// duration of one transaction. `NoopRawMutex` is fine because all
+/// consumers run as embassy tasks on the single executor — no preemption,
+/// no interrupt-context users.
+type SharedI2cBus = Mutex<NoopRawMutex, esp_hal::i2c::master::I2c<'static, esp_hal::Async>>;
 
 // Two URL slots live in RTC-slow RAM so they survive deep sleep:
 //
@@ -463,10 +474,10 @@ static TEMP_HUMIDITY: embassy_sync::signal::Signal<
     Option<reterminal_e100x::sht40::TempHumidity>,
 > = embassy_sync::signal::Signal::new();
 
-/// SY6974B charger state — battery / charging / full / fault.
-/// E1004 only; on E1002 (different charger IC, no I²C) this stays
-/// `None` and the URL is built without a `power=` param. Set once
-/// per boot by `sensor_task`.
+/// SY6974B charger state — battery / charging / full / fault. Set once
+/// per boot by `sensor_task`. E1004 reads it on I²C0 (same bus as the
+/// SHT40); E1001 / E1002 read it on I²C1 (GPIO39 / GPIO40, dedicated
+/// to the charger).
 static POWER_STATUS: embassy_sync::signal::Signal<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
     Option<reterminal_e100x::sy6974b::PowerStatus>,
@@ -477,23 +488,21 @@ async fn sensor_task(
     battery_enable: Output<'static>,
     adc1: esp_hal::peripherals::ADC1<'static>,
     battery_sense: esp_hal::peripherals::GPIO1<'static>,
-    mut i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
+    sht40_bus: Arc<SharedI2cBus>,
+    charger_bus: Arc<SharedI2cBus>,
 ) {
-    // Battery (ADC + GPIO21) is independent of I²C0, so it runs in
-    // parallel with the I²C-bound chain. Inside the chain, reads
-    // share the bus sequentially: SHT40 first, then (E1004 only) the
-    // SY6974B charger.
-    let i2c_reads = async {
-        let temp_humidity = reterminal_e100x::sht40::read_temp_humidity(&mut i2c0).await;
-        #[cfg(feature = "e1004")]
-        let power_status = reterminal_e100x::sy6974b::read_power_status(&mut i2c0).await;
-        #[cfg(not(feature = "e1004"))]
-        let power_status: Option<reterminal_e100x::sy6974b::PowerStatus> = None;
-        (temp_humidity, power_status)
-    };
-    let (battery_mv, (temp_humidity, power_status)) = embassy_futures::join::join(
+    let mut sht40_i2c = I2cDevice::new(&*sht40_bus);
+    let mut charger_i2c = I2cDevice::new(&*charger_bus);
+
+    // All three reads run concurrently. The two I²C reads each take
+    // the bus only for the duration of their transactions: on
+    // E1001 / E1002 they sit on different buses and overlap fully;
+    // on E1004 they share I²C0 and the mutex inside `I2cDevice`
+    // serialises them at transaction granularity.
+    let (battery_mv, temp_humidity, power_status) = embassy_futures::join::join3(
         reterminal_e100x::battery::read_battery(battery_enable, adc1, battery_sense),
-        i2c_reads,
+        reterminal_e100x::sht40::read_temp_humidity(&mut sht40_i2c),
+        reterminal_e100x::sy6974b::read_power_status(&mut charger_i2c),
     )
     .await;
     BATTERY_MV.signal(battery_mv);
@@ -972,26 +981,85 @@ async fn main(spawner: Spawner) -> ! {
         blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap(),
     );
 
-    // One task that drives both per-wake sensor reads (battery ADC +
-    // SHT40 over I²C0) concurrently via `join`. By the time the URL
-    // is being built in `main_normal`, both signals have been
-    // populated — the 10 ms ADC settle + the 10 ms SHT40 conversion
-    // happen alongside the ~1.3 s WiFi association, so the `wait()`s
-    // are essentially free.
-    let i2c0 = esp_hal::i2c::master::I2c::new(
-        peripherals.I2C0,
-        esp_hal::i2c::master::Config::default(),
-    )
-    .unwrap()
-    .with_sda(peripherals.GPIO19)
-    .with_scl(peripherals.GPIO20)
-    .into_async();
+    // One task drives all three per-wake sensor reads (battery ADC,
+    // SHT40 over I²C0, SY6974B charger over I²C0 on E1004 / I²C1 on
+    // E1001 / E1002) concurrently via `join3`. By the time the URL
+    // is being built in `main_normal`, all three signals have been
+    // populated — the ADC settle + the SHT40 conversion + the
+    // charger read happen alongside the ~1.3 s WiFi association, so
+    // the `wait()`s are essentially free.
+    //
+    // I²C buses go through `embassy_embedded_hal`'s `I2cDevice` so
+    // multiple consumers can share a bus without explicit locking at
+    // the call site — each transaction internally locks the bus mutex
+    // and releases it.
+    let i2c0_bus: Arc<SharedI2cBus> = Arc::new(Mutex::new(
+        esp_hal::i2c::master::I2c::new(
+            peripherals.I2C0,
+            esp_hal::i2c::master::Config::default(),
+        )
+        .unwrap()
+        .with_sda(peripherals.GPIO19)
+        .with_scl(peripherals.GPIO20)
+        .into_async(),
+    ));
+
+    // E1001 / E1002 carry the SY6974B on a dedicated I²C1 (GPIO39 SDA
+    // / GPIO40 SCL); E1004 puts it on the shared I²C0 alongside the
+    // SHT40. The driver is the same; only the bus differs.
+    //
+    // TEMP: 10 kHz instead of the 100 kHz default while we diagnose
+    // weak-pull-up rise times on I²C1. Set back to default once the
+    // chip is responding.
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
+    let i2c1_bus: Arc<SharedI2cBus> = Arc::new(Mutex::new(
+        esp_hal::i2c::master::I2c::new(
+            peripherals.I2C1,
+            esp_hal::i2c::master::Config::default()
+                .with_frequency(esp_hal::time::Rate::from_khz(10)),
+        )
+        .unwrap()
+        .with_sda(peripherals.GPIO39)
+        .with_scl(peripherals.GPIO40)
+        .into_async(),
+    ));
+
+    // TEMP diagnostic: scan both I²C buses once at boot so we can see
+    // what actually answers. Drop once the SY6974B address is confirmed.
+    {
+        use embedded_hal_async::i2c::I2c;
+        async fn scan(name: &str, bus: &SharedI2cBus) {
+            let mut bus = bus.lock().await;
+            let mut count = 0u32;
+            for addr in 0x08u8..=0x77u8 {
+                // Zero-byte write — sends START + addr+W + STOP and only
+                // checks the address ACK. A `read` probe misses chips
+                // like the SHT40 that ack the address but NACK data when
+                // idle. Disambiguate vs the inherent (blocking) `write`.
+                if I2c::write(&mut *bus, addr, &[]).await.is_ok() {
+                    println!("{} scan: responder at 0x{:02x}", name, addr);
+                    count += 1;
+                }
+            }
+            println!("{} scan complete ({} responder(s))", name, count);
+        }
+        scan("I²C0", &i2c0_bus).await;
+        #[cfg(any(feature = "e1001", feature = "e1002"))]
+        scan("I²C1", &i2c1_bus).await;
+    }
+
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
+    let charger_bus: Arc<SharedI2cBus> = Arc::clone(&i2c1_bus);
+    #[cfg(feature = "e1004")]
+    let charger_bus: Arc<SharedI2cBus> = Arc::clone(&i2c0_bus);
+
     spawner.spawn(
         sensor_task(
             Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
             peripherals.ADC1,
             peripherals.GPIO1,
-            i2c0,
+            i2c0_bus,
+            charger_bus,
         )
         .unwrap(),
     );

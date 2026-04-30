@@ -170,34 +170,6 @@ To do, in order, when a real E1001 lands:
    wholesale to TRMNL's `epd75_old_gray_init` (option 2). Confirm
    visually, then keep whichever set works.
 
-## SY6974B charger reporting on E1002 / E1001
-
-E1004 reads charger state from the SY6974B over I²C0 in `sensor_task`,
-and the URL-builder appends `power=` only when that read is `Some`. The
-cfg gate is currently `#[cfg(feature = "e1004")]`, with E1002 (and
-prospectively E1001) opting out.
-
-Per the Zephyr device trees for both 7" reTerminals
-([E1001](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1001/reterminal_e1001_procpu.dts),
-[E1002](https://github.com/zephyrproject-rtos/zephyr/blob/main/boards/seeed/reterminal_e1002/reterminal_e1002_procpu.dts)),
-both devices carry a SY6974B at `i2c1 0x6B` — the difference vs E1004
-isn't "no charger", it's "different bus": E1004 puts the charger on
-I²C0 (already up for the SHT40), while E1001 / E1002 put it on I²C1
-(GPIO39 SDA / GPIO40 SCL, currently not initialised by the firmware).
-
-To do:
-
-1. Bring up I²C1 in `main()` alongside the existing I²C0 init; make
-   `sensor_task` accept both buses.
-2. Move the SY6974B read off I²C0 onto I²C1 for E1001 / E1002. E1004 stays
-   on I²C0 — same driver, different bus instance.
-3. Drop the `#[cfg(feature = "e1004")]` gate around the charger
-   read; populate `POWER_STATUS` on all three devices.
-
-DTS values to match if we ever write to `REG02` / `REG04`:
-charge current 500 mA, charge voltage 4.208 V on E1001 / E1002 (the
-E1004 DTS lists 1000 mA — a different battery pack).
-
 ## E1001: 2-level B/W auto-detect
 
 The E1001 firmware currently always drives the panel in 4-level

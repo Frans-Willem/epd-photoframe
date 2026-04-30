@@ -1,11 +1,10 @@
 //! SHT40 (temperature + humidity) reading on I²C0. The sensor sits at
-//! 0x44, behind GPIO19/GPIO20 (SDA/SCL) on both E1002 and E1004. It's
+//! 0x44, behind GPIO19/GPIO20 (SDA/SCL) on all three devices. It's
 //! always-powered (a 0 Ω resistor jumpers SYS_3V3 straight to the
 //! sensor's VDD), so there's no enable pin to toggle.
 
 use embassy_time::Delay;
-use esp_hal::Async;
-use esp_hal::i2c::master::I2c;
+use embedded_hal_async::i2c::I2c;
 use esp_println::println;
 use fixed::types::I16F16;
 use sht4x::{Precision, Sht4xAsync};
@@ -24,7 +23,7 @@ pub struct TempHumidity {
 /// CRC mismatch, …). Borrows the bus for the duration of the
 /// transaction so other devices on the same I²C0 (PCF8563 RTC,
 /// SY6974B charger on E1004) can be read sequentially.
-pub async fn read_temp_humidity(i2c: &mut I2c<'static, Async>) -> Option<TempHumidity> {
+pub async fn read_temp_humidity<B: I2c>(i2c: &mut B) -> Option<TempHumidity> {
     let mut sensor = Sht4xAsync::new(i2c);
     let mut delay = Delay;
     match sensor.measure(Precision::High, &mut delay).await {

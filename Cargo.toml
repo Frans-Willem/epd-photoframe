@@ -68,6 +68,7 @@ heapless = { version = "0.9", default-features = false }
 edge-captive = { version = "0.7.0", default-features = false, features = ["io"] }
 edge-http = { version = "0.7.0", default-features = false, features = ["io"] }
 embassy-sync = { version = "0.8", default-features = false }
+embassy-embedded-hal = { version = "0.6", default-features = false }
 edge-nal = "0.6"
 edge-nal-embassy = { version = "0.8.1", default-features = false, features = ["tcp", "udp", "proto-ipv4"] }
 fluent-uri = { version = "0.4.1", default-features = false, features = ["alloc"] }
