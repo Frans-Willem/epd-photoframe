@@ -952,11 +952,13 @@ fn try_decode_frame<C: PanelColor>(
 /// bits per pixel. PNG packs sub-byte pixels MSB-first — the leftmost
 /// pixel lives in the high-order bits of each byte — and `bit_depth` is
 /// always a divisor of 8 (1, 2, 4, or 8), so pixels never straddle bytes.
+/// The mask is computed in `u16` so `bit_depth == 8` doesn't overflow
+/// `1u8 << 8`.
 fn palette_index_at(row: &[u8], x: usize, bit_depth: u8) -> u8 {
     let bit_pos = x * bit_depth as usize;
     let byte = row[bit_pos / 8];
     let shift = 8 - bit_depth - (bit_pos % 8) as u8;
-    let mask = (1u8 << bit_depth) - 1;
+    let mask = ((1u16 << bit_depth) - 1) as u8;
     (byte >> shift) & mask
 }
 
