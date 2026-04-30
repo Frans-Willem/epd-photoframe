@@ -54,6 +54,11 @@ pub type EpdPanel = T133A01<
 /// hard-coding `Spectra6Color` / `Gray2` per device.
 pub type EpdColor = <EpdPanel as Panel<Spi<'static, esp_hal::Async>>>::Color;
 
+/// The panel's per-init mode selector — see [`Panel::InitMode`]. Most
+/// devices use `()` (single mode); E1001's UC8179 driver exposes
+/// `Bw` / `FourLevel`.
+pub type EpdInitMode = <EpdPanel as Panel<Spi<'static, esp_hal::Async>>>::InitMode;
+
 /// What the user (or the wake timer) wants us to do this cycle. Consumed
 /// by the normal flow to pick an `action=` query-string fragment and to
 /// decide whether to run the white pre-flash.

@@ -59,6 +59,14 @@ pub trait Panel<SPI: SpiBus> {
     type Color: PanelColor;
     type Error: core::fmt::Debug;
 
+    /// Init-time mode picker. `()` for panels that have only one mode;
+    /// drivers with multiple init sequences (e.g. UC8179's B/W vs
+    /// 4-level grayscale) expose an enum and select via
+    /// [`init_mode_for_palette`](Self::init_mode_for_palette). The
+    /// `Default` impl is the safe choice when the colours aren't known
+    /// yet (e.g. the all-white pre-flash).
+    type InitMode: Default + Copy;
+
     const WIDTH: usize;
     const HEIGHT: usize;
 
@@ -69,11 +77,18 @@ pub trait Panel<SPI: SpiBus> {
     /// stream order.
     fn output_index_to_image_xy(idx: usize) -> (usize, usize);
 
+    /// Pick the init mode best-suited to the colours actually present
+    /// in `palette`. Single-mode panels return `()` without walking the
+    /// iterator; multi-mode panels iterate (with early exit where
+    /// possible) to choose the cheapest waveform that covers the
+    /// content.
+    fn init_mode_for_palette(palette: impl IntoIterator<Item = Self::Color>) -> Self::InitMode;
+
     async fn enable(&mut self) -> Result<(), Self::Error>;
     async fn disable(&mut self) -> Result<(), Self::Error>;
 
     async fn reset(&mut self) -> Result<(), Self::Error>;
-    async fn init(&mut self, spi: &mut SPI) -> Result<(), Self::Error>;
+    async fn init(&mut self, spi: &mut SPI, mode: Self::InitMode) -> Result<(), Self::Error>;
 
     async fn power_on(&mut self, spi: &mut SPI) -> Result<(), Self::Error>;
     async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error>;

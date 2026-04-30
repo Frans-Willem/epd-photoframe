@@ -329,8 +329,10 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
 
     // WiFi is now off. Decode (and palette-quantise) the PNG body.
     // Preserve the server's Refresh hint on decode errors so the
-    // error path can still honour it.
-    let frame_result: Result<Vec<EpdColor>, String>;
+    // error path can still honour it. `try_decode_frame` returns
+    // both the row-major frame and the actual PNG palette (sized to
+    // `1 << bit_depth`) so the caller can pick a panel init mode.
+    let frame_result: Result<(Vec<EpdColor>, Vec<EpdColor>), String>;
     let hint: Option<RefreshHint>;
     match fetch_result {
         Ok((body, h)) => {
@@ -351,55 +353,64 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // absolute `Instant` so the time we then spend on the panel refresh
     // + UART flush is automatically subtracted from the sleep duration
     // when we compute it below.
-    let (frame, wakeup_requested): (_, embassy_time::Instant) = match frame_result {
-        Ok(frame) => {
-            match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
-                // The server often sends relative URLs (e.g. just
-                // `/screen/foo`), so resolve against whatever we just
-                // fetched rather than the NVS base.
-                Some(raw) => match reterminal_e100x::url_util::resolve(&current_url, raw) {
-                    Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str()) {
-                        Ok(stored) => {
-                            println!("Stashing redirect URL for next Timer wake: {}", abs);
-                            REDIRECT_URL.set(stored);
+    let (frame, palette, wakeup_requested): (_, Vec<EpdColor>, embassy_time::Instant) =
+        match frame_result {
+            Ok((frame, palette)) => {
+                match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
+                    // The server often sends relative URLs (e.g. just
+                    // `/screen/foo`), so resolve against whatever we just
+                    // fetched rather than the NVS base.
+                    Some(raw) => match reterminal_e100x::url_util::resolve(&current_url, raw) {
+                        Some(abs) => {
+                            match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str()) {
+                                Ok(stored) => {
+                                    println!("Stashing redirect URL for next Timer wake: {}", abs);
+                                    REDIRECT_URL.set(stored);
+                                }
+                                Err(heapless::CapacityError { .. }) => {
+                                    println!(
+                                        "Redirect URL too long ({} bytes); dropping",
+                                        abs.len()
+                                    );
+                                    REDIRECT_URL.clear();
+                                }
+                            }
                         }
-                        Err(heapless::CapacityError { .. }) => {
-                            println!("Redirect URL too long ({} bytes); dropping", abs.len());
+                        None => {
+                            println!("Unresolvable redirect URL {:?}; dropping", raw);
                             REDIRECT_URL.clear();
                         }
                     },
-                    None => {
-                        println!("Unresolvable redirect URL {:?}; dropping", raw);
-                        REDIRECT_URL.clear();
-                    }
-                },
-                // No pending redirect from the server — leave the slot
-                // empty (already cleared on entry for non-Timer wakes;
-                // `take()`n on entry for Timer wakes).
-                None => {}
+                    // No pending redirect from the server — leave the slot
+                    // empty (already cleared on entry for non-Timer wakes;
+                    // `take()`n on entry for Timer wakes).
+                    None => {}
+                }
+                let wakeup = hint
+                    .map(|h| h.refresh_time)
+                    .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_SUCCESS_SLEEP);
+                (frame, palette, wakeup)
             }
-            let wakeup = hint
-                .map(|h| h.refresh_time)
-                .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_SUCCESS_SLEEP);
-            (frame, wakeup)
-        }
-        Err(msg) => {
-            println!("Falling back to error image: {}", msg);
-            // Clear CURRENT_URL so the next wake falls back to the NVS
-            // base URL — if the stored current URL is what caused the
-            // error (e.g. a bad redirect committed last cycle), a
-            // transient retry against the same URL would just loop.
-            CURRENT_URL.clear();
-            let wakeup = hint
-                .map(|h| h.refresh_time)
-                .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_ERROR_SLEEP);
-            let retry_in = wakeup.saturating_duration_since(embassy_time::Instant::now());
-            (
-                error_image::render(panel_width, panel_height, &msg, retry_in),
-                wakeup,
-            )
-        }
-    };
+            Err(msg) => {
+                println!("Falling back to error image: {}", msg);
+                // Clear CURRENT_URL so the next wake falls back to the NVS
+                // base URL — if the stored current URL is what caused the
+                // error (e.g. a bad redirect committed last cycle), a
+                // transient retry against the same URL would just loop.
+                CURRENT_URL.clear();
+                let wakeup = hint
+                    .map(|h| h.refresh_time)
+                    .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_ERROR_SLEEP);
+                let retry_in = wakeup.saturating_duration_since(embassy_time::Instant::now());
+                // The error image is rendered with `BLACK` and `WHITE` only,
+                // so its effective palette is exactly those two colours.
+                (
+                    error_image::render(panel_width, panel_height, &msg, retry_in),
+                    Vec::from([EpdColor::BLACK, EpdColor::WHITE]),
+                    wakeup,
+                )
+            }
+        };
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     //
@@ -412,13 +423,20 @@ async fn main_normal(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // software-resets the device. The next boot's
     // `determine_wake_action` picks up `PENDING_ACTION` and resumes
     // with that action, the same way it would for a deep-sleep wake.
+    // Pick the cheapest init mode that covers the frame. On E1001 this
+    // chooses B/W vs 4-level grayscale based on the colours actually
+    // present in the PNG palette (≈ half the SPI traffic + faster
+    // waveform when the server-side content is already 1bpp).
+    // Single-mode panels return `()` immediately without iterating.
+    let init_mode = EpdPanel::init_mode_for_palette(palette.iter().copied());
+    println!("Init mode: {:?}", init_mode);
     let panel_update = async {
         println!("Reset");
         epd.reset().await.unwrap();
         println!("Wait until idle");
         epd.wait_until_idle().await.unwrap();
         println!("Init");
-        epd.init(&mut spi_bus).await.unwrap();
+        epd.init(&mut spi_bus, init_mode).await.unwrap();
         println!("Power on");
         epd.power_on(&mut spi_bus).await.unwrap();
         println!("Update frame");
@@ -824,11 +842,16 @@ async fn try_fetch<'t>(
 /// `try_fetch` because the `minipng` decode buffer and palette lookup
 /// are by far the biggest transient allocations in the fetch cycle, and
 /// we run with WiFi off while they're in flight.
+///
+/// Returns `(frame, palette)`. The palette holds exactly the
+/// `1 << bit_depth` real PNG palette entries (2 for 1bpp, 4 for 2bpp,
+/// …) — the caller passes it to [`Panel::init_mode_for_palette`] to
+/// pick the cheapest panel init mode that covers the content.
 fn try_decode_frame<C: PanelColor>(
     body: &[u8],
     panel_width: usize,
     panel_height: usize,
-) -> Result<Vec<C>, String> {
+) -> Result<(Vec<C>, Vec<C>), String> {
     use embedded_graphics::pixelcolor::Rgb888;
     println!("Decode PNG");
     let header = minipng::decode_png_header(body).map_err(|e| format!("PNG header: {:?}", e))?;
@@ -872,11 +895,12 @@ fn try_decode_frame<C: PanelColor>(
         other => return Err(format!("Unsupported PNG bit depth: {:?}", other)),
     };
 
-    // Build a 256-entry lookup mapping PNG palette indices to the panel's
-    // colour type. The `from_rgb` cost is paid once per palette entry
-    // (max 256), not once per pixel.
-    let png_palette: Vec<C> = (0..=255)
-        .map(|index| image.palette(index))
+    // Build the palette → panel-colour lookup. Read only the
+    // `1 << bit_depth` real PNG palette entries (2 for 1bpp, 4 for
+    // 2bpp, …) — `from_rgb` is paid once per entry, not per pixel.
+    let palette_len = 1usize << bit_depth;
+    let png_palette: Vec<C> = (0..palette_len)
+        .map(|index| image.palette(index as u8))
         .map(|rgba| C::from_rgb(Rgb888::new(rgba[0], rgba[1], rgba[2])))
         .collect();
 
@@ -921,7 +945,7 @@ fn try_decode_frame<C: PanelColor>(
             frame.push(png_palette[palette_index as usize]);
         }
     }
-    Ok(frame)
+    Ok((frame, png_palette))
 }
 
 /// Extract the palette index for pixel `x` in a row packed at `bit_depth`
@@ -1164,7 +1188,10 @@ async fn main(spawner: Spawner) -> ! {
         println!("Wait until idle");
         epd.wait_until_idle().await.unwrap();
         println!("Init");
-        epd.init(&mut epd_spi_bus).await.unwrap();
+        // Ask the panel which init mode covers an all-white palette;
+        // on E1001 that's `Bw`, single-mode panels return `()`.
+        let init_mode = EpdPanel::init_mode_for_palette([EpdColor::WHITE]);
+        epd.init(&mut epd_spi_bus, init_mode).await.unwrap();
         println!("Power on");
         epd.power_on(&mut epd_spi_bus).await.unwrap();
         println!("Update frame (white)");

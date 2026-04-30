@@ -138,6 +138,7 @@ where
 {
     type Color = Spectra6Color;
     type Error = Gdep073e01Error<SPI, CS, BUSY, DC, RST>;
+    type InitMode = ();
 
     const WIDTH: usize = 800;
     const HEIGHT: usize = 480;
@@ -145,6 +146,8 @@ where
     fn output_index_to_image_xy(idx: usize) -> (usize, usize) {
         (idx % Self::WIDTH, idx / Self::WIDTH)
     }
+
+    fn init_mode_for_palette(_palette: impl IntoIterator<Item = Self::Color>) -> Self::InitMode {}
 
     async fn enable(&mut self) -> Result<(), Self::Error> {
         Ok(())
@@ -164,7 +167,7 @@ where
         Ok(())
     }
 
-    async fn init(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
+    async fn init(&mut self, spi: &mut SPI, _mode: Self::InitMode) -> Result<(), Self::Error> {
         // Call after reset.
         self.command(spi, Command::CMDH, [0x49, 0x55, 0x20, 0x08, 0x09, 0x18])
             .await?;

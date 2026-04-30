@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::config_image;
 use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
 use crate::net_resources::NETWORK_RESOURCES;
-use crate::panel::Panel;
+use crate::panel::{Panel, PanelColor};
 
 mod portal;
 
@@ -204,7 +204,11 @@ async fn panel_render_task(
     println!("Wait until idle");
     epd.wait_until_idle().await.unwrap();
     println!("Init");
-    epd.init(&mut spi_bus).await.unwrap();
+    // The config-mode frame is rendered with `BLACK` + `WHITE` only
+    // (QR plus instruction text); ask the panel which init mode covers
+    // that. On E1001 that's `Bw`; single-mode panels return `()`.
+    let init_mode = EpdPanel::init_mode_for_palette([EpdColor::BLACK, EpdColor::WHITE]);
+    epd.init(&mut spi_bus, init_mode).await.unwrap();
     println!("Power on");
     epd.power_on(&mut spi_bus).await.unwrap();
     println!("Update frame (QR)");

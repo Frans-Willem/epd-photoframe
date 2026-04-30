@@ -238,9 +238,12 @@ where
 {
     type Color = Spectra6Color;
     type Error = T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>;
+    type InitMode = ();
 
     const WIDTH: usize = PANEL_WIDTH;
     const HEIGHT: usize = PANEL_HEIGHT;
+
+    fn init_mode_for_palette(_palette: impl IntoIterator<Item = Self::Color>) -> Self::InitMode {}
 
     /// The T133A01 has master/slave controllers each taking a half-width
     /// stripe, so the iterator emits the left half fully before the right
@@ -274,7 +277,7 @@ where
         Ok(())
     }
 
-    async fn init(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
+    async fn init(&mut self, spi: &mut SPI, _mode: Self::InitMode) -> Result<(), Self::Error> {
         // NOTE: Call after reset
         self.command(
             spi,
