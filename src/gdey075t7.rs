@@ -36,16 +36,23 @@ where
 // reTerminal E1001). Controller: Ultrachip UC8179.
 
 /// Per-init mode select. Picked at `init` time and saved on the driver
-/// so the matching `update_frame` path knows whether to upload one
-/// plane (B/W) or two (4-level grayscale).
+/// so the matching `update_frame` path knows what to upload.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Gdey075t7InitMode {
-    /// 1bpp B/W: PSR `0x1F` (LUT from OTP), single-plane upload via
-    /// DTM2 (`0x13`). Roughly half the SPI traffic of 4-level mode and
-    /// uses the panel's faster B/W refresh waveform. The default —
-    /// matches what the all-white pre-flash needs without inspection.
+    /// 1bpp B/W full anti-ghost: PSR `0x1F` (LUT from OTP),
+    /// single-plane upload via DTM2 (`0x13`). Multi-phase OTP waveform
+    /// (~5 s, several flashes) for clean transitions on mixed-B/W
+    /// content.
     #[default]
     Bw,
+    /// 1bpp B/W single-phase fast: PSR `0x3F` with the GxEPD2 partial
+    /// LUTs loaded into registers, ~1.4 s and one flash. Sends DTM1
+    /// = bitwise inverse of DTM2 so every pixel sees an active K↔W
+    /// transition (no ghosting carry-over even though the chip has no
+    /// real prior frame loaded). Good for the all-white pre-flash and
+    /// other throwaway frames; the trade-off vs `Bw` is more long-term
+    /// ghost retention since the cleaning phases are skipped.
+    BwFast,
     /// 4-level grayscale: PSR `0x3F` (LUT from registers), custom LUTs
     /// loaded via cmds `0x20..=0x25`, two 1bpp planes uploaded via
     /// DTM1 (high bit) + DTM2 (low bit).
@@ -72,6 +79,7 @@ enum Command {
     Cdi = 0x50, // VCOM and data-interval setting
     Tcon = 0x60,
     Tres = 0x61, // resolution
+    VcomDc = 0x82,
 }
 
 impl From<Command> for u8 {
@@ -123,6 +131,39 @@ const LUT_BD_4G: [u8; 42] = [
     0x00, 0x1E, 0x05, 0x1E, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+// Single-phase B/W LUTs lifted verbatim from GxEPD2's partial-update
+// path (`GxEPD2_750_T7.cpp`, `lut_*_partial`). One active group of
+// 6 bytes [voltage_select, T1, T2, T3, T4, repeat]; `T1+T2+T3+T4 = 70`
+// frames at the panel's refresh rate. Paired with PSR `0x3F`,
+// VCOM_DC `0x26`, CDI `0x39, 0x07`. LUT_KW (`0x5A`) drives K→W,
+// LUT_WK (`0x84`) drives W→K; LUT_WW / LUT_KK are deliberate no-ops
+// since the matching `update_frame` path sends DTM1 = ¬DTM2 so every
+// pixel sees a real transition.
+const LUT_VCOM_FAST: [u8; 42] = [
+    0x00, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const LUT_WW_FAST: [u8; 42] = [
+    0x00, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const LUT_KW_FAST: [u8; 42] = [
+    0x5A, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const LUT_WK_FAST: [u8; 42] = [
+    0x84, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const LUT_KK_FAST: [u8; 42] = [
+    0x00, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const LUT_BD_FAST: [u8; 42] = [
+    0x00, 30, 5, 30, 5, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 pub enum Gdey075t7Error<SPI, CS, BUSY, DC, RST>
@@ -239,15 +280,25 @@ where
         (idx % Self::WIDTH, idx / Self::WIDTH)
     }
 
-    /// `Bw` if every colour in the palette is already pure black or
-    /// pure white (Gray2 luma 0 or 3); else `FourLevel`. Walks the
-    /// iterator with early exit on the first midtone.
+    /// Pick the cheapest mode that covers the palette:
+    ///   - any midtone (luma 1 or 2) → `FourLevel` (custom 4-gray LUTs).
+    ///   - any black (luma 0) without midtones → `Bw` (full anti-ghost
+    ///     OTP B/W).
+    ///   - empty palette or only-white → `BwFast` (single-phase LUT, no
+    ///     anti-ghosting needed when there's nothing to ghost).
     fn init_mode_for_palette(palette: impl IntoIterator<Item = Self::Color>) -> Self::InitMode {
-        let bw_only = palette.into_iter().all(|c| matches!(c.luma(), 0 | 3));
-        if bw_only {
+        let mut has_black = false;
+        for c in palette {
+            match c.luma() {
+                0 => has_black = true,
+                3 => {}
+                _ => return Gdey075t7InitMode::FourLevel,
+            }
+        }
+        if has_black {
             Gdey075t7InitMode::Bw
         } else {
-            Gdey075t7InitMode::FourLevel
+            Gdey075t7InitMode::BwFast
         }
     }
 
@@ -270,18 +321,25 @@ where
     }
 
     async fn init(&mut self, spi: &mut SPI, mode: Self::InitMode) -> Result<(), Self::Error> {
-        // Common 1bpp init from GxEPD2's known-good base. The two modes
-        // diverge on three registers:
+        // Common 1bpp init from GxEPD2's known-good base. The three modes
+        // diverge on a few registers and on whether custom LUTs are
+        // loaded:
         //
-        //   - PSR (`0x00`): bit `0x20` = "LUT from registers" (4-gray)
-        //     vs OTP (B/W). `0x3F` for 4-gray, `0x1F` for B/W.
-        //   - CDI (`0x50`): VCOM-and-data-interval timing. `0x31, 0x07`
-        //     for 4-gray, `0x29, 0x07` for B/W.
-        //   - Custom waveform LUTs (`0x20..=0x25`): only sent in 4-gray
-        //     mode; B/W mode uses the OTP-baked LUT.
-        let (psr, cdi) = match mode {
-            Gdey075t7InitMode::Bw => (0x1F, [0x29, 0x07]),
-            Gdey075t7InitMode::FourLevel => (0x3F, [0x31, 0x07]),
+        //   - PSR (`0x00`): bit `0x20` = "LUT from registers" vs OTP.
+        //     `0x1F` for `Bw` (OTP), `0x3F` for `BwFast` and `FourLevel`.
+        //   - CDI (`0x50`): VCOM-and-data-interval timing. Mode-specific.
+        //   - Custom waveform LUTs (`0x20..=0x25`): only loaded for the
+        //     two register-LUT modes; `Bw` uses the OTP-baked LUT.
+        //   - VCOM_DC (`0x82`): only set for `BwFast` (GxEPD2's partial
+        //     path uses `0x26` = -2.0 V; the other modes leave it at OTP).
+        let cdi = match mode {
+            Gdey075t7InitMode::Bw => [0x29, 0x07],
+            Gdey075t7InitMode::BwFast => [0x39, 0x07],
+            Gdey075t7InitMode::FourLevel => [0x31, 0x07],
+        };
+        let psr = match mode {
+            Gdey075t7InitMode::Bw => 0x1F,
+            Gdey075t7InitMode::BwFast | Gdey075t7InitMode::FourLevel => 0x3F,
         };
         self.command(spi, Command::PowerSetting, [0x07, 0x07, 0x3F, 0x3F])
             .await?;
@@ -292,13 +350,25 @@ where
         self.command(spi, Command::Cdi, cdi).await?;
         self.command(spi, Command::Tcon, [0x22]).await?;
 
-        if mode == Gdey075t7InitMode::FourLevel {
-            self.command(spi, Command::Lut20Vcom, LUT_VCOM_4G).await?;
-            self.command(spi, Command::Lut21Ww, LUT_WW_4G).await?;
-            self.command(spi, Command::Lut22Bw, LUT_BW_4G).await?;
-            self.command(spi, Command::Lut23Wb, LUT_WB_4G).await?;
-            self.command(spi, Command::Lut24Bb, LUT_BB_4G).await?;
-            self.command(spi, Command::Lut25Bd, LUT_BD_4G).await?;
+        match mode {
+            Gdey075t7InitMode::Bw => {}
+            Gdey075t7InitMode::BwFast => {
+                self.command(spi, Command::VcomDc, [0x26]).await?;
+                self.command(spi, Command::Lut20Vcom, LUT_VCOM_FAST).await?;
+                self.command(spi, Command::Lut21Ww, LUT_WW_FAST).await?;
+                self.command(spi, Command::Lut22Bw, LUT_KW_FAST).await?;
+                self.command(spi, Command::Lut23Wb, LUT_WK_FAST).await?;
+                self.command(spi, Command::Lut24Bb, LUT_KK_FAST).await?;
+                self.command(spi, Command::Lut25Bd, LUT_BD_FAST).await?;
+            }
+            Gdey075t7InitMode::FourLevel => {
+                self.command(spi, Command::Lut20Vcom, LUT_VCOM_4G).await?;
+                self.command(spi, Command::Lut21Ww, LUT_WW_4G).await?;
+                self.command(spi, Command::Lut22Bw, LUT_BW_4G).await?;
+                self.command(spi, Command::Lut23Wb, LUT_WB_4G).await?;
+                self.command(spi, Command::Lut24Bb, LUT_BB_4G).await?;
+                self.command(spi, Command::Lut25Bd, LUT_BD_4G).await?;
+            }
         }
 
         self.last_init_mode = mode;
@@ -317,17 +387,22 @@ where
         Ok(())
     }
 
-    /// In 4-level mode, stream the frame as two 1bpp bit-planes — DTM1
-    /// (`0x10`) carries the high bit of each pixel's 2-bit grey code,
-    /// DTM2 (`0x13`) the low bit. The iterator is walked twice (once
-    /// per plane); no intermediate frame buffer is allocated.
+    /// Per-mode frame upload.
     ///
-    /// In B/W mode, only the high bit is sent — via DTM2 (`0x13`),
-    /// matching the UC8179 1bpp convention where `0x13` is the
-    /// "current/new image" buffer. Pure-white pixels (luma 3) → bit 1,
-    /// pure-black (luma 0) → bit 0; midtones (which shouldn't be
-    /// present if `init_mode_for_palette` picked B/W) collapse via the
-    /// high-bit shift.
+    /// - **`Bw`**: only the high bit, sent via DTM2 (`0x13`) — the
+    ///   UC8179 1bpp "current image" buffer. Pure-white pixels (luma 3)
+    ///   → bit 1, pure-black (luma 0) → bit 0.
+    /// - **`BwFast`**: same high-bit plane via DTM2, plus its bitwise
+    ///   inverse via DTM1 (`0x10`). With the partial LUTs loaded, every
+    ///   pixel sees an active K↔W transition (drives via LUT_KW or
+    ///   LUT_WK rather than LUT_KK / LUT_WW which are no-ops). Without
+    ///   this, pixels whose target equals an undefined "previous"
+    ///   buffer state would carry over panel residue.
+    /// - **`FourLevel`**: two planes — DTM1 high bit, DTM2 low bit —
+    ///   for the 2-bit grey code.
+    ///
+    /// In every mode the source iterator is walked once or twice over
+    /// `pixels`; no intermediate frame buffer is allocated.
     async fn update_frame(
         &mut self,
         spi: &mut SPI,
@@ -335,6 +410,20 @@ where
     ) -> Result<(), Self::Error> {
         match self.last_init_mode {
             Gdey075t7InitMode::Bw => {
+                self.command(
+                    spi,
+                    Command::DataStartTransmission2,
+                    pack_plane::<_, 1>(pixels.into_iter()),
+                )
+                .await?;
+            }
+            Gdey075t7InitMode::BwFast => {
+                self.command(
+                    spi,
+                    Command::DataStartTransmission1,
+                    pack_plane::<_, 1>(pixels.clone().into_iter()).map(|b| !b),
+                )
+                .await?;
                 self.command(
                     spi,
                     Command::DataStartTransmission2,
