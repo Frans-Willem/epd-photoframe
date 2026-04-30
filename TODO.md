@@ -24,17 +24,6 @@ change, no schema migration.
 mode-selector (DHCP / static) on the portal form that conditionally
 shows the IP / mask / gateway / DNS fields.
 
-## Button presses during refresh are ignored
-
-During the ~20 s panel refresh the app is blocked on `wait_until_idle`, so
-a button press during that window only takes effect on the *next* wake
-cycle (after the current refresh finishes and the device deep-sleeps).
-
-Consider handling this better — e.g. detect the press, reset the panel
-(which aborts the in-progress refresh), and restart the main flow as if
-this were a fresh wake. Concretely, this probably means running a
-button-watching task concurrently with the refresh wait.
-
 ## Power saving — further audit
 
 WiFi is now brought up and torn down inside
@@ -212,24 +201,6 @@ branch).
 DTS values to match if we ever write to `REG02` / `REG04`:
 charge current 500 mA, charge voltage 4.208 V on E1001 / E1002 (the
 E1004 DTS lists 1000 mA — a different battery pack).
-
-## E1001: 2-level B/W auto-detect
-
-The E1001 firmware currently always drives the panel in 4-level
-grayscale mode (UC8179 LUT-from-registers, two 1bpp planes uploaded
-sequentially via cmds `0x10` / `0x13`). When the server-emitted PNG
-only uses two distinct gray levels (pure black and white), we could
-fall back to the 1bpp B&W path: PSR `0x1F`, no custom LUTs, single
-plane upload. That's roughly half the SPI traffic and uses the
-panel's faster B&W refresh waveform from OTP.
-
-Detection: PNG palette has ≤ 2 entries that aren't both gray
-midtones. Cheap to check inside `try_decode_frame`. Switching modes
-mid-life means a second init sequence in the driver — could be an
-extra `init_1bpp` method on `Gdey075t7` plus a runtime mode flag, or
-two separate driver instances picked by the caller.
-
-Out of scope for the initial E1001 PR.
 
 ## E1004: investigate quad-SPI for panel data
 
