@@ -1,11 +1,11 @@
 [package]
 edition      = "2024"
-name         = "reterminal_e100x"
+name         = "epd-photoframe"
 rust-version = "1.91"
 version      = "0.1.0"
 
 [[bin]]
-name = "reterminal_e100x"
+name = "epd_photoframe"
 path = "./src/bin/main.rs"
 
 [features]

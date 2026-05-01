@@ -23,18 +23,18 @@ use esp_hal::system::SleepSource;
 
 extern crate alloc;
 
-use reterminal_e100x::config::Config;
-use reterminal_e100x::config_mode;
-use reterminal_e100x::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
-use reterminal_e100x::panel::{Panel, PanelColor};
-use reterminal_e100x::panic_mode;
+use epd_photoframe::config::Config;
+use epd_photoframe::config_mode;
+use epd_photoframe::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
+use epd_photoframe::panel::{Panel, PanelColor};
+use epd_photoframe::panic_mode;
 
 #[cfg(feature = "e1002")]
-use reterminal_e100x::gdep073e01::Gdep073e01;
+use epd_photoframe::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1001")]
-use reterminal_e100x::gdey075t7::Gdey075t7;
+use epd_photoframe::gdey075t7::Gdey075t7;
 #[cfg(feature = "e1004")]
-use reterminal_e100x::t133a01::T133A01;
+use epd_photoframe::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -74,7 +74,7 @@ fn determine_wake_action(
     // value left behind by a previous abort can't leak through if the
     // following soft reset never happened (e.g. brownout / watchdog).
     if reset_reason == Some(esp_hal::rtc_cntl::SocResetReason::CoreSw) {
-        if let Some(action) = reterminal_e100x::normal_mode::PENDING_ACTION.take() {
+        if let Some(action) = epd_photoframe::normal_mode::PENDING_ACTION.take() {
             println!(
                 "Resuming with pending action {:?} from previous cycle",
                 action
@@ -82,7 +82,7 @@ fn determine_wake_action(
             return action;
         }
     } else {
-        reterminal_e100x::normal_mode::PENDING_ACTION.clear();
+        epd_photoframe::normal_mode::PENDING_ACTION.clear();
     }
 
     match wake_reason {
@@ -195,11 +195,11 @@ async fn main(spawner: Spawner) -> ! {
     );
     println!(
         "RTC CURRENT_URL: {:?}",
-        reterminal_e100x::normal_mode::CURRENT_URL.get().as_deref()
+        epd_photoframe::normal_mode::CURRENT_URL.get().as_deref()
     );
     println!(
         "RTC REDIRECT_URL: {:?}",
-        reterminal_e100x::normal_mode::REDIRECT_URL.get().as_deref()
+        epd_photoframe::normal_mode::REDIRECT_URL.get().as_deref()
     );
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
@@ -269,7 +269,7 @@ async fn main(spawner: Spawner) -> ! {
             .with_scl(peripherals.GPIO20)
             .into_async();
     spawner.spawn(
-        reterminal_e100x::normal_mode::sensor_task(
+        epd_photoframe::normal_mode::sensor_task(
             Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
             peripherals.ADC1,
             peripherals.GPIO1,
@@ -357,7 +357,7 @@ async fn main(spawner: Spawner) -> ! {
         gpio_btn_next: gpio_btn_next.degrade(),
         spi_bus: epd_spi_bus,
         epd,
-        buzzer: reterminal_e100x::buzzer::Buzzer::new(peripherals.LEDC, peripherals.GPIO45),
+        buzzer: epd_photoframe::buzzer::Buzzer::new(peripherals.LEDC, peripherals.GPIO45),
     };
 
     // --- Panic-render fast path -----------------------------------------
@@ -464,14 +464,14 @@ async fn run_normal_boot(
     if let Some(creds) = creds
         && !entering_config_mode
     {
-        reterminal_e100x::normal_mode::run(hw, creds).await
+        epd_photoframe::normal_mode::run(hw, creds).await
     } else {
         // Entering config mode is a deliberate reset of the device's
         // "what's displayed" state — whatever URL was committed last
         // cycle (and any pending redirect) is no longer relevant once
         // the user has reconfigured.
-        reterminal_e100x::normal_mode::CURRENT_URL.clear();
-        reterminal_e100x::normal_mode::REDIRECT_URL.clear();
+        epd_photoframe::normal_mode::CURRENT_URL.clear();
+        epd_photoframe::normal_mode::REDIRECT_URL.clear();
         config_mode::run(hw, config).await
     }
 }

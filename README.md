@@ -1,5 +1,5 @@
-reTerminal E100x playground
-===========================
+epd-photoframe
+==============
 Purpose
 -------
 Playing around with Rust, ESP32, Embassy, and eInk.
