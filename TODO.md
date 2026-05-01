@@ -322,25 +322,6 @@ advertised URL, set it via the portal, and check that
 doesn't, figure out whether we need an additional feature /
 `embassy-net-mdns` crate or an explicit multicast subscription.
 
-## Clean up the UART-flush helper
-
-`wait_for_uart_tx_idle` in `main.rs` mirrors
-`esp_hal::uart::UartTx::flush` by polling the UART0 PAC directly —
-it works, but the raw `esp_hal::peripherals::UART0::regs()` reads
-feel out of place in otherwise peripherals-owned-via-`esp_hal::init`
-application code. Ideally we'd grab `peripherals.UART0` in `main()`,
-wrap it in a real `UartTx`, thread it through `HardwareCtx`, and
-call its `flush()` before `sleep_deep`.
-
-The only snag is that `esp-println` writes to UART0 via ROM
-functions rather than taking the peripheral through the PAC, so
-both "owners" share the hardware — in practice they cooperate
-because the ROM functions just poke registers, but the
-peripherals-ownership story would get a bit hand-wavy. Worth
-looking at what `esp_hal::uart::UartTx::new` actually does to see
-whether splitting the registers / using the existing `Uart` type
-alongside esp-println is explicitly supported.
-
 ## `read_and_clear_rtc_gpio_wake_status` extraction
 
 The PAC-poking helper still lives in `src/bin/main.rs`. With
