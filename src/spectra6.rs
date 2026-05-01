@@ -1,6 +1,6 @@
 use crate::panel::PanelColor;
 use embedded_graphics::pixelcolor::raw::RawU4;
-use embedded_graphics::pixelcolor::{PixelColor, Rgb888};
+use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
 
 #[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Spectra6Color {
@@ -11,6 +11,9 @@ pub enum Spectra6Color {
     Red = 3,
     Blue = 5,
     Green = 6,
+    /// Panel-internal "clean" / discharge level. Not a paint colour;
+    /// excluded from [`PanelColor::all`].
+    #[allow(dead_code)]
     Clean = 7,
 }
 
@@ -30,23 +33,90 @@ impl PanelColor for Spectra6Color {
             Spectra6Color::Red,
             Spectra6Color::Blue,
             Spectra6Color::Green,
-            Spectra6Color::Clean,
         ]
         .into_iter()
     }
 
-    fn to_rgb(&self) -> Option<Rgb888> {
-        SPECTRA_6_PALETTE
+    /// Closest-match search against [`SPECTRA_6_CHROMA_ANCHORS`] in
+    /// `ChromaColor` space. Falls back to `Spectra6Color::default()`
+    /// (`White`) only if the anchor table is empty — unreachable in
+    /// practice, but cheaper than an `.unwrap()` panic path.
+    fn from_rgb(value: Rgb888) -> Self {
+        let pt = ChromaColor::from_rgb(value);
+        SPECTRA_6_CHROMA_ANCHORS
             .iter()
-            .find_map(|(rgb, c)| (*c == *self).then_some(*rgb))
+            .min_by_key(|(c, _)| c.dist_sq(&pt))
+            .map(|(_, color)| *color)
+            .unwrap_or_default()
+    }
+}
+
+/// A point in an integer Cartesian-chromaticity colour space derived from
+/// sRGB. Each component is an `i16`, all three share the same 0..510
+/// magnitude range, and Euclidean distance is balanced across hue, chroma
+/// magnitude, and lightness — so closest-match against a fixed anchor set
+/// is just `min_by_key(|a| a.dist_sq(&pt))`.
+///
+/// ```text
+/// x = 2R − G − B          ∈ [-510, 510]   chroma along R ↔ CMY
+/// y = 2·(G − B)           ∈ [-510, 510]   chroma along G ↔ M
+/// v = 2·max(R, G, B)      ∈ [   0, 510]   value (HSV's V, scaled ×2)
+/// ```
+///
+/// Topologically equivalent to the `(S·cos H, S·sin H, V)` cylindrical
+/// projection of HSV but with HSV's hexagonal hue replaced by Cartesian
+/// chromaticity. The `√3/2` factor that would round the chroma plane to a
+/// perfect circle is approximated as 1, leaving a slight ellipse — fine
+/// for closest-match classification because both anchors and inputs live
+/// in the same space. Pure integer arithmetic; no division, no trig.
+#[derive(Clone, Copy)]
+struct ChromaColor {
+    x: i16,
+    y: i16,
+    v: i16,
+}
+
+impl ChromaColor {
+    fn from_rgb(rgb: Rgb888) -> Self {
+        let r = rgb.r() as i16;
+        let g = rgb.g() as i16;
+        let b = rgb.b() as i16;
+        ChromaColor {
+            x: 2 * r - g - b,
+            y: 2 * (g - b),
+            v: 2 * r.max(g).max(b),
+        }
     }
 
-    // `from_rgb` intentionally falls through to the default trait impl
-    // (closest-match search by squared Euclidean distance over `all()`,
-    // skipping `Clean` since its `to_rgb` is `None`). A previous hand-tuned
-    // decision tree variant was untested on hardware — see TODO.md
-    // ("Spectra6Color::from_rgb decision tree").
+    fn dist_sq(&self, other: &Self) -> i32 {
+        let dx = (self.x - other.x) as i32;
+        let dy = (self.y - other.y) as i32;
+        let dv = (self.v - other.v) as i32;
+        dx * dx + dy * dy + dv * dv
+    }
 }
+
+/// Mean chromaticity of each Spectra-6 colour across the 16 sample palettes
+/// the firmware expects to receive — all from the `epd-dither` crate:
+///
+/// - 14 panel calibration variants in `epd_dither::spectra6`
+///   (`SPECTRA6_D{50,65}{,_ADJUSTED,_BPC{50,75,80,90,100}_ADJUSTED}`)
+/// - `epd_dither::decompose::naive::EPDOPTIMIZE` (taken as-is from the
+///   `epdoptimize` toolchain)
+/// - `epd_dither::decompose::octahedron::NAIVE_RGB6` (pure primaries and
+///   secondaries — the untuned octahedral reference)
+///
+/// Means computed in `ChromaColor` space and rounded to the nearest
+/// integer; the resulting closest-anchor classifier agrees with all
+/// 96 (palette × colour) reference rows.
+const SPECTRA_6_CHROMA_ANCHORS: &[(ChromaColor, Spectra6Color)] = &[
+    (ChromaColor { x:  -30, y:  -36, v:  93 }, Spectra6Color::Black),
+    (ChromaColor { x:  -42, y:  -13, v: 451 }, Spectra6Color::White),
+    (ChromaColor { x:  239, y:  402, v: 450 }, Spectra6Color::Yellow),
+    (ChromaColor { x:  310, y:   16, v: 328 }, Spectra6Color::Red),
+    (ChromaColor { x: -268, y: -195, v: 369 }, Spectra6Color::Blue),
+    (ChromaColor { x: -100, y:  121, v: 301 }, Spectra6Color::Green),
+];
 
 pub struct SpectraPacker<T>(pub T);
 
@@ -80,20 +150,3 @@ pub fn test_screen(width: usize, height: usize) -> impl Iterator<Item = Spectra6
     })
 }
 
-pub const SPECTRA_6_PALETTE: &[(Rgb888, Spectra6Color)] = &[
-    (Rgb888::new(0x19, 0x1E, 0x21), Spectra6Color::Black),
-    (Rgb888::new(0xE8, 0xE8, 0xE8), Spectra6Color::White),
-    (Rgb888::new(0x21, 0x57, 0xBA), Spectra6Color::Blue),
-    (Rgb888::new(0x12, 0x5F, 0x20), Spectra6Color::Green),
-    (Rgb888::new(0xB2, 0x13, 0x18), Spectra6Color::Red),
-    (Rgb888::new(0xEF, 0xDE, 0x44), Spectra6Color::Yellow),
-];
-
-pub const SPECTRA_6_PALETTE_SATURATED: &[(Rgb888, Spectra6Color)] = &[
-    (Rgb888::new(0, 0, 0), Spectra6Color::Black),
-    (Rgb888::new(255, 255, 255), Spectra6Color::White),
-    (Rgb888::new(33, 87, 186), Spectra6Color::Blue),
-    (Rgb888::new(18, 95, 32), Spectra6Color::Green),
-    (Rgb888::new(178, 19, 24), Spectra6Color::Red),
-    (Rgb888::new(239, 222, 68), Spectra6Color::Yellow),
-];

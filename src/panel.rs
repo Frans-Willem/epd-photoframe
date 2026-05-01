@@ -20,38 +20,22 @@
 //! controller-level commands over SPI: the high-voltage rails need to be
 //! on for both the SPI pixel upload and the actual refresh.
 
-use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
+use embedded_graphics::pixelcolor::{PixelColor, Rgb888};
 use embedded_hal_async::spi::SpiBus;
 
 pub trait PanelColor: PixelColor {
     const BLACK: Self;
     const WHITE: Self;
 
-    /// Every variant the panel's controller can emit, including any
-    /// non-paint sentinel values. Sentinels should report `to_rgb() == None`
-    /// so they're skipped by the default `from_rgb` closest-match search.
+    /// Every paint colour the panel can render. Excludes any non-paint
+    /// sentinel variants (e.g. Spectra-6's `Clean`) — callers may treat
+    /// the iterated values as a complete palette.
     fn all() -> impl Iterator<Item = Self>;
 
-    /// RGB rendering of a paint colour, or `None` for sentinel values
-    /// (e.g. Spectra6's `Clean`).
-    fn to_rgb(&self) -> Option<Rgb888>;
-
-    /// Closest match for an arbitrary RGB. Default implementation searches
-    /// `all()` by squared Euclidean distance, skipping any variant whose
-    /// `to_rgb` is `None`. Override if a faster lookup is available
-    /// (e.g. Spectra6's hand-tuned decision tree).
-    fn from_rgb(rgb: Rgb888) -> Self {
-        Self::all()
-            .filter_map(|c| c.to_rgb().map(|p| (c, p)))
-            .min_by_key(|(_, p)| {
-                let dr = p.r() as i32 - rgb.r() as i32;
-                let dg = p.g() as i32 - rgb.g() as i32;
-                let db = p.b() as i32 - rgb.b() as i32;
-                dr * dr + dg * dg + db * db
-            })
-            .map(|(c, _)| c)
-            .unwrap_or(Self::BLACK)
-    }
+    /// Quantise an arbitrary RGB to the closest panel colour. Each
+    /// implementor picks its own metric — Spectra-6 uses a chromaticity
+    /// closest-match, `Gray2` uses luma quantisation.
+    fn from_rgb(rgb: Rgb888) -> Self;
 }
 
 #[allow(async_fn_in_trait)]

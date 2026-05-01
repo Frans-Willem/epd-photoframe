@@ -1,19 +1,5 @@
 # TODO
 
-## Pull in the new Spectra-6 palette from `epd-dither`
-
-`src/spectra6.rs` carries `SPECTRA_6_PALETTE` (the panel-anchor RGB
-values used as the closest-match targets for `Spectra6Color::from_rgb`)
-and the saturated reference set. The `epd-dither` repository has since
-landed an updated palette — measured/tuned against newer panels — that
-should produce better colour matching on the E1002 / E1004.
-
-Bring the new constants in and replace `SPECTRA_6_PALETTE`. Verify
-on-hardware against a known reference image (e.g. a six-band test
-strip) that the closest-match outputs improved. The
-`SPECTRA_6_PALETTE_SATURATED` set may or may not need updating in
-parallel — check what the dither repo treats as its "saturated" anchors.
-
 ## Config-mode hold timer should count from boot, not after the white flash
 
 Currently `main()` does `epd.enable()` → white pre-flash (which on
@@ -82,53 +68,30 @@ deep-sleep with RTC-IO wake and resume-on-next-boot) would save
 more — worth revisiting once we have battery-life measurements to
 justify the added complexity.
 
-## `Spectra6Color::from_rgb` decision tree
+## Wire up host-runnable unit tests
 
-`PanelColor::from_rgb` defaults to a closest-match search by squared
-Euclidean distance over `all()` — six iterations per pixel. There used
-to be a hand-tuned decision tree override on `Spectra6Color` that
-short-circuited that with hard-coded thresholds:
+`src/grayscale.rs` carries `#[cfg(test)] mod tests` for `Gray2::from_rgb`
+(level anchors, boundary rounding, BT.601 weighting). `cargo test` does
+not currently run them: the crate is `#![no_std]` with the build target
+pinned to `xtensa-esp32s3-none-elf` in `.cargo/config.toml`, the test
+harness needs `std`, and forcing `--target $(host)` fails because
+`esp-hal` and friends aren't portable.
 
-```rust
-fn from_rgb(value: Rgb888) -> Self {
-    if value.r() < 105 {
-        if value.b() < 109 {
-            if value.g() < 62 {
-                Spectra6Color::Black
-            } else {
-                Spectra6Color::Green
-            }
-        } else {
-            Spectra6Color::Blue
-        }
-    } else if value.g() < 120 {
-        Spectra6Color::Red
-    } else if value.b() < 150 {
-        Spectra6Color::Yellow
-    } else {
-        Spectra6Color::White
-    }
-}
-```
+Two reasonable shapes:
 
-It was never validated on hardware — the partition planes happen to
-agree with `SPECTRA_6_PALETTE` for the six exact palette anchors but
-the behaviour at off-anchor RGBs was never measured against the
-closest-match version. We removed it for now in favour of the
-verified default; the per-pixel cost of the default isn't measurable
-in `try_decode_frame` because the lookup runs once per *PNG palette
-entry* (max 256), not once per pixel.
+1. **Workspace + sibling test crate**: split out a leaf crate
+   `epd-photoframe-core` that holds the portable modules
+   (`spectra6`, `grayscale`, `panel`, `iter_util`, …) with no esp-hal
+   dependency, then have a sibling `epd-photoframe-core-tests` that
+   targets the host. Firmware depends on the core crate as today.
+2. **In-tree feature gate**: add a `host-tests` feature that
+   `#[cfg]`-gates out every esp-hal-dependent module so the lib can
+   compile for `x86_64-unknown-linux-gnu` when that feature is on.
+   Cheaper to land but uglier to maintain — every new module needs to
+   pick a side.
 
-To do, if we ever decide the per-palette closest-match cost matters:
-
-1. Generate a corpus of test RGBs (uniform sampling and the typical
-   server-emitted-then-dithered pixels we see in practice).
-2. Compare the decision tree's output against the closest-match output
-   pixel-for-pixel; find the points of disagreement.
-3. Either tune the thresholds until they agree, or accept the
-   disagreements as cosmetic and document why.
-4. Restore the override in `src/spectra6.rs` with a test that pins the
-   chosen thresholds.
+(1) is the cleaner long-term answer. Start there if we add more than
+one or two test files; otherwise (2) buys time.
 
 ## E1001 4-gray waveform LUT — validate on hardware
 
