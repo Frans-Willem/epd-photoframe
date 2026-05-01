@@ -23,6 +23,12 @@
 use embedded_graphics::pixelcolor::{PixelColor, Rgb888};
 use embedded_hal_async::spi::SpiBus;
 
+pub mod gdep073e01;
+pub mod gdey075t7;
+pub mod grayscale;
+pub mod spectra6;
+pub mod t133a01;
+
 pub trait PanelColor: PixelColor {
     const BLACK: Self;
     const WHITE: Self;

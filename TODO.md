@@ -360,30 +360,6 @@ with the failing-step message inlined. The validation reuses
 `normal_mode`, so this entry implies promoting them to `pub(crate)`
 exports.
 
-## Reorganise panel drivers under `src/panel/`
-
-`panel.rs` is the trait module and lives next to four sibling files
-that all `impl` it (`gdep073e01.rs`, `gdey075t7.rs`, `t133a01.rs`, plus
-the colour-space helpers `spectra6.rs` and `grayscale.rs`). Promote
-`panel.rs` to `src/panel/mod.rs` and pull each driver in alongside it:
-
-```
-src/panel/
-  mod.rs          (the `Panel` / `PanelColor` traits — was `panel.rs`)
-  gdep073e01.rs   (E1002)
-  gdey075t7.rs    (E1001)
-  t133a01.rs      (E1004)
-  spectra6.rs     (E1002 / E1004 colour space)
-  grayscale.rs    (E1001 4-level Gray2 helper)
-```
-
-Update `lib.rs` to expose the submodules through `pub mod panel;` plus
-`pub use panel::{gdep073e01, gdey075t7, t133a01, spectra6, grayscale};`
-(or rewrite the dependents to use the `crate::panel::…` paths
-directly). Behaviour is identical; this is a directory-layout
-cleanup that keeps the lib root from accumulating a long flat list of
-panel-specific modules.
-
 ## Drop `[patch.crates-io]` pins once upstream releases land
 
 `Cargo.toml` currently patches two crates against upstream git commits

@@ -1,5 +1,5 @@
+use super::Panel;
 use crate::iter_util::ChunksHeaplessExt;
-use crate::panel::Panel;
 use core::marker::PhantomData;
 use embassy_time::{Duration, Timer};
 use embedded_graphics::pixelcolor::{Gray2, GrayColor};

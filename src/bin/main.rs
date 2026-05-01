@@ -30,11 +30,11 @@ use epd_photoframe::panel::{Panel, PanelColor};
 use epd_photoframe::panic_mode;
 
 #[cfg(feature = "e1002")]
-use epd_photoframe::gdep073e01::Gdep073e01;
+use epd_photoframe::panel::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1001")]
-use epd_photoframe::gdey075t7::Gdey075t7;
+use epd_photoframe::panel::gdey075t7::Gdey075t7;
 #[cfg(feature = "e1004")]
-use epd_photoframe::t133a01::T133A01;
+use epd_photoframe::panel::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>

@@ -7,7 +7,7 @@
 
 use embedded_graphics::pixelcolor::{Gray2, GrayColor, Rgb888, RgbColor};
 
-use crate::panel::PanelColor;
+use super::PanelColor;
 
 impl PanelColor for Gray2 {
     const BLACK: Self = <Self as GrayColor>::BLACK;

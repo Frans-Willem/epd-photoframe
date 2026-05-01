@@ -1,4 +1,4 @@
-use crate::panel::PanelColor;
+use super::PanelColor;
 use embedded_graphics::pixelcolor::raw::RawU4;
 use embedded_graphics::pixelcolor::{PixelColor, Rgb888, RgbColor};
 

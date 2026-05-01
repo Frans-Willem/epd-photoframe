@@ -1,6 +1,6 @@
+use super::Panel;
+use super::spectra6::{Spectra6Color, SpectraPacker};
 use crate::iter_util::ChunksHeaplessExt;
-use crate::panel::Panel;
-use crate::spectra6::{Spectra6Color, SpectraPacker};
 use core::marker::PhantomData;
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};

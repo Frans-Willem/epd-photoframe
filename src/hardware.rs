@@ -13,11 +13,11 @@ use crate::buzzer::Buzzer;
 use crate::panel::Panel;
 
 #[cfg(feature = "e1002")]
-use crate::gdep073e01::Gdep073e01;
+use crate::panel::gdep073e01::Gdep073e01;
 #[cfg(feature = "e1001")]
-use crate::gdey075t7::Gdey075t7;
+use crate::panel::gdey075t7::Gdey075t7;
 #[cfg(feature = "e1004")]
-use crate::t133a01::T133A01;
+use crate::panel::t133a01::T133A01;
 
 /// Fully-specialised type of the built panel driver. All variants
 /// implement the [`crate::panel::Panel`] trait so the rest of the firmware
