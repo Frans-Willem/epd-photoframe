@@ -1,22 +1,5 @@
 # TODO
 
-## Config-mode hold timer should count from boot, not after the white flash
-
-Currently `main()` does `epd.enable()` → white pre-flash (which on
-Timer wakes is skipped, but on every other wake runs a non-blocking
-"send the white frame, return immediately" sequence) → then races a
-10-second timer against `wait_for_high()` on Previous + Next. The 10
-s window therefore starts *after* the pre-flash setup work, which on
-some wakes is a non-trivial fraction of a second and shifts the
-deadline relative to "when the user pressed the buttons".
-
-Anchor the deadline to power-on instead: take an `embassy_time::Instant`
-right at the top of `main()` (before any panel I/O), then race
-`Timer::at(boot_instant + Duration::from_secs(10))` instead of
-`Timer::after(Duration::from_secs(10))`. The user's perceived hold
-duration becomes "10 seconds since the LED started blinking", which
-matches their intuition.
-
 ## Static-IP + explicit WPA auth-type configuration
 
 The current NVS schema stores just the three fields the portal form

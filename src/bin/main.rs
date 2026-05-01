@@ -7,7 +7,7 @@
 )]
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 
@@ -454,7 +454,7 @@ async fn run_normal_boot(
             embassy_futures::select::select3(
                 prev_input.wait_for_high(),
                 next_input.wait_for_high(),
-                Timer::after(Duration::from_secs(10)),
+                Timer::at(Instant::MIN + Duration::from_secs(10)),
             )
             .await,
             embassy_futures::select::Either3::Third(_)
