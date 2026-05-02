@@ -268,6 +268,15 @@ async fn main(spawner: Spawner) -> ! {
             .with_sda(peripherals.GPIO19)
             .with_scl(peripherals.GPIO20)
             .into_async();
+
+    // PPK2 measurement mode: park the SY6974B charger in HIZ before
+    // anything else runs so the system rail spends as little time as
+    // possible drawing through VBUS. This must happen after I²C0 is up
+    // (the chip lives on this bus) but before any code that depends on
+    // the BAT-only power path being established.
+    #[cfg(all(feature = "e1004", feature = "ppk2"))]
+    let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
+
     spawner.spawn(
         epd_photoframe::normal_mode::sensor_task(
             Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
