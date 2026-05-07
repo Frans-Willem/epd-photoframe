@@ -32,11 +32,12 @@ use crate::rtc_persisted::RtcPersisted;
 /// Cached BSSID + channel of the AP we last associated with. Pinning
 /// both at the next association lets the radio go straight to that
 /// channel and AP without scanning, shaving ~1–2 s off the connect
-/// phase. The slot is `take()`n at use, then re-`set()` on success —
-/// so a stale hint that fails to associate falls back to a normal
-/// scan on the *next* boot rather than locking the device into a
-/// retry loop. `RtcPersisted`'s magic gate handles the cold-boot
-/// "all zeros = no hint" case.
+/// phase. The slot is `take()`n at use, then re-`set()` on success.
+/// If the pinned attempt fails, `wifi_runner` retries once with a
+/// no-hint fallback config in the same session, so a stale hint
+/// only costs an extra connect-attempt's worth of time.
+/// `RtcPersisted`'s magic gate handles the cold-boot "all zeros =
+/// no hint" case.
 #[esp_hal::ram(unstable(rtc_slow, persistent))]
 static WIFI_HINT: RtcPersisted<WifiHint> = RtcPersisted::new();
 
@@ -44,6 +45,15 @@ static WIFI_HINT: RtcPersisted<WifiHint> = RtcPersisted::new();
 struct WifiHint {
     bssid: [u8; 6],
     channel: u8,
+}
+
+/// Drop any cached BSSID/channel. Call from `config_mode` when the
+/// stored WiFi credentials are written: a fresh SSID/password may
+/// belong to a different AP, in which case the previous hint would
+/// fail and force a fallback scan on every wake until the slot
+/// gets overwritten with a fresh hint anyway.
+pub fn clear_hint() {
+    WIFI_HINT.clear();
 }
 
 #[derive(Debug)]
@@ -137,28 +147,30 @@ where
     // so a stale hint costs an extra connect-attempt's worth of time
     // rather than a whole error-frame cycle.
     let hint = WIFI_HINT.take();
-    let used_hint = hint.is_some();
     let base_sta_cfg = esp_radio::wifi::sta::StationConfig::default()
         .with_ssid(creds.ssid.as_str())
         .with_password(creds.password.as_str().into());
-    let initial_sta_cfg = match &hint {
+    let (initial_sta_cfg, fallback_config) = match hint {
         Some(h) => {
             println!(
                 "WiFi hint: BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, channel {}",
                 h.bssid[0], h.bssid[1], h.bssid[2], h.bssid[3], h.bssid[4], h.bssid[5], h.channel
             );
-            base_sta_cfg
+            let pinned = base_sta_cfg
                 .clone()
                 .with_bssid(h.bssid)
-                .with_channel(h.channel)
+                .with_channel(h.channel);
+            (
+                pinned,
+                Some(esp_radio::wifi::Config::Station(base_sta_cfg)),
+            )
         }
         None => {
             println!("WiFi hint: none (cold boot or stale; will scan)");
-            base_sta_cfg.clone()
+            (base_sta_cfg, None)
         }
     };
     let initial_config = esp_radio::wifi::Config::Station(initial_sta_cfg);
-    let fallback_config = esp_radio::wifi::Config::Station(base_sta_cfg);
     let controller_config =
         esp_radio::wifi::ControllerConfig::default().with_initial_config(initial_config);
     let (controller, interfaces) =
@@ -171,7 +183,7 @@ where
     // reconnecting silently.
     match select(
         run_with_wifi(&status, interfaces, timeout, f),
-        wifi_runner(&status, controller, fallback_config, used_hint),
+        wifi_runner(&status, controller, fallback_config),
     )
     .await
     {
@@ -255,18 +267,18 @@ where
 /// so the main work can gate on the *initial* association; mid-session
 /// disconnects trigger a silent reconnect.
 ///
-/// If the initial association used a cached BSSID/channel hint and it
-/// fails, the runner reconfigures the controller with `fallback_config`
-/// (no hint) and retries once before surfacing the error to the main
-/// task. After that single fallback, normal "signal-and-retry-after-
-/// delay" behaviour resumes.
+/// `fallback_config` carries the no-hint config when the initial
+/// attempt was made with a cached BSSID/channel hint: on the first
+/// failure the runner reconfigures the controller with it and retries
+/// once before surfacing the error. `None` means "the initial config
+/// is the only one to try" — failures go straight to `status.signal`.
+/// The slot is `take()`n on use, so the fallback fires at most once
+/// per session.
 async fn wifi_runner<'d>(
     status: &WifiStatus,
     mut controller: esp_radio::wifi::WifiController<'d>,
-    fallback_config: esp_radio::wifi::Config,
-    initial_attempt_used_hint: bool,
+    mut fallback_config: Option<esp_radio::wifi::Config>,
 ) -> ! {
-    let mut hint_in_use = initial_attempt_used_hint;
     loop {
         match controller.connect_async().await {
             Ok(_) => {
@@ -303,25 +315,23 @@ async fn wifi_runner<'d>(
                 );
                 Timer::after(POST_DISCONNECT_PAUSE).await;
             }
-            Err(e) if hint_in_use => {
+            Err(e) if fallback_config.is_some() => {
                 // Stale hint? Drop the BSSID/channel pin and retry
                 // immediately with the no-hint config — that scan
                 // will find the AP wherever it actually lives now.
-                // Only one fallback per session: if the no-hint
-                // attempt also fails, we go down the normal
-                // signal-error path.
+                // `take()` ensures the fallback fires at most once
+                // per session: if the no-hint attempt also fails,
+                // we go down the normal signal-error path.
+                let fb = fallback_config.take().unwrap();
                 println!(
                     "WiFi connect with cached hint failed: {:?}; falling back to scan",
                     e
                 );
-                if let Err(ce) = controller.set_config(&fallback_config) {
+                if let Err(ce) = controller.set_config(&fb) {
                     println!("set_config to fallback failed: {:?}", ce);
                     status.signal(Err(ce));
                     Timer::after(RECONNECT_RETRY_DELAY).await;
-                    hint_in_use = false;
-                    continue;
                 }
-                hint_in_use = false;
             }
             Err(e) => {
                 println!(
