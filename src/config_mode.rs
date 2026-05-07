@@ -152,6 +152,10 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
             if let Err(e) = nvs.set_image_url(&creds.url) {
                 println!("WARNING: failed to write image.url: {:?}", e);
             }
+            // Any cached BSSID/channel belonged to the *previous*
+            // SSID; if creds just changed it's stale, so drop it
+            // and let the next boot scan fresh.
+            crate::single_shot_wifi::clear_hint();
             // Give the HTTP response a moment to flush before we reboot.
             Timer::after(Duration::from_millis(500)).await;
         }
