@@ -27,6 +27,24 @@ use esp_println::println;
 
 use crate::hardware::WifiCredentials;
 use crate::net_resources::NETWORK_RESOURCES;
+use crate::rtc_persisted::RtcPersisted;
+
+/// Cached BSSID + channel of the AP we last associated with. Pinning
+/// both at the next association lets the radio go straight to that
+/// channel and AP without scanning, shaving ~1–2 s off the connect
+/// phase. The slot is `take()`n at use, then re-`set()` on success —
+/// so a stale hint that fails to associate falls back to a normal
+/// scan on the *next* boot rather than locking the device into a
+/// retry loop. `RtcPersisted`'s magic gate handles the cold-boot
+/// "all zeros = no hint" case.
+#[esp_hal::ram(unstable(rtc_slow, persistent))]
+static WIFI_HINT: RtcPersisted<WifiHint> = RtcPersisted::new();
+
+#[derive(Clone, Copy)]
+struct WifiHint {
+    bssid: [u8; 6],
+    channel: u8,
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -105,11 +123,26 @@ where
 
     // --- Construct the controller. `ControllerConfig::initial_config`
     // starts the radio in station mode with the supplied credentials. ---
-    let station_config = esp_radio::wifi::Config::Station(
-        esp_radio::wifi::sta::StationConfig::default()
-            .with_ssid(creds.ssid.as_str())
-            .with_password(creds.password.as_str().into()),
-    );
+    //
+    // If we have a cached BSSID + channel from a prior successful
+    // association, pin them both — the radio skips the scan and goes
+    // straight to that AP. Take()n out of the slot so a failed
+    // association doesn't lock us into retrying with a stale hint;
+    // a fresh one is written back after a successful connect.
+    let hint = WIFI_HINT.take();
+    let mut sta_cfg = esp_radio::wifi::sta::StationConfig::default()
+        .with_ssid(creds.ssid.as_str())
+        .with_password(creds.password.as_str().into());
+    if let Some(h) = hint {
+        sta_cfg = sta_cfg.with_bssid(h.bssid).with_channel(h.channel);
+        println!(
+            "WiFi hint: BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, channel {}",
+            h.bssid[0], h.bssid[1], h.bssid[2], h.bssid[3], h.bssid[4], h.bssid[5], h.channel
+        );
+    } else {
+        println!("WiFi hint: none (cold boot or stale; will scan)");
+    }
+    let station_config = esp_radio::wifi::Config::Station(sta_cfg);
     let controller_config =
         esp_radio::wifi::ControllerConfig::default().with_initial_config(station_config);
     let (controller, interfaces) =
@@ -212,6 +245,25 @@ async fn wifi_runner<'d>(
     loop {
         match controller.connect_async().await {
             Ok(_) => {
+                // Cache the AP we just associated with so the next
+                // boot can pin BSSID + channel and skip the scan.
+                // Failure to read ap_info is non-fatal — we just
+                // skip caching for this cycle.
+                match controller.ap_info() {
+                    Ok(info) => {
+                        println!(
+                            "Connected to BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {}",
+                            info.bssid[0], info.bssid[1], info.bssid[2],
+                            info.bssid[3], info.bssid[4], info.bssid[5],
+                            info.channel
+                        );
+                        WIFI_HINT.set(WifiHint {
+                            bssid: info.bssid,
+                            channel: info.channel,
+                        });
+                    }
+                    Err(e) => println!("ap_info() failed; not caching hint: {:?}", e),
+                }
                 status.signal(Ok(()));
                 // Block until the station drops off the AP, then
                 // pause briefly before reconnecting. The `Ok` we
