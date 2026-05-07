@@ -60,5 +60,11 @@ release_flag=""
 if [[ "${RELEASE:-}" == "1" ]]; then
     release_flag="--release"
 fi
+# `EXTRA_FEATURES=foo,bar` env var appends extra cargo features
+# alongside the device feature — e.g. `disable_charger` for PPK2 bench builds.
+features="$device"
+if [[ -n "${EXTRA_FEATURES:-}" ]]; then
+    features="${features},${EXTRA_FEATURES}"
+fi
 echo $$ > "$pid_file"
-exec script -qfc "cargo run $release_flag --features $device -- --port $port" "$log"
+exec script -qfc "cargo run $release_flag --features $features -- --port $port" "$log"

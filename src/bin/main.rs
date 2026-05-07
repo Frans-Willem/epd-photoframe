@@ -274,7 +274,7 @@ async fn main(spawner: Spawner) -> ! {
     // possible drawing through VBUS. This must happen after I²C0 is up
     // (the chip lives on this bus) but before any code that depends on
     // the BAT-only power path being established.
-    #[cfg(all(feature = "e1004", feature = "ppk2"))]
+    #[cfg(all(feature = "e1004", feature = "disable_charger"))]
     let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
 
     spawner.spawn(

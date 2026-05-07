@@ -24,7 +24,7 @@ e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
 # charger). Also disables the chip's I²C watchdog so HIZ doesn't
 # auto-clear after 40 s. The cell, if also connected, will not charge
 # while this build runs.
-ppk2 = []
+disable_charger = []
 
 [dependencies]
 esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"] }
