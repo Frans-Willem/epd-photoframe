@@ -28,6 +28,7 @@ pub mod qr_image;
 pub mod rtc_persisted;
 pub mod sht40;
 pub mod single_shot_wifi;
+pub mod sleep;
 pub mod sy6974b;
 pub mod uart;
 pub mod url_util;

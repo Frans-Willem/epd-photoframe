@@ -198,7 +198,7 @@ fn force_led_on() {
 /// retry.
 pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
     let HardwareCtx {
-        mut rtc,
+        rtc,
         mut gpio_btn_refresh,
         mut gpio_btn_previous,
         mut gpio_btn_next,
@@ -260,10 +260,6 @@ pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
             esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
         ),
     ];
-    let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
-    let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] = &[&pin_wake_source];
-
-    println!("Going to deep sleep after panic render (button-only wake)");
-    wait_for_tx_idle();
-    rtc.sleep_deep(wake_sources);
+    println!("Panic render done; deep-sleeping (button-only wake)");
+    crate::sleep::start_sleep(rtc, None, wakeup_pins);
 }
