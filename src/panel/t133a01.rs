@@ -59,75 +59,75 @@ impl From<Command> for u8 {
     }
 }
 
-pub enum T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+pub enum T133A01Error<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
-    SPI: SpiBus,
-    CS_MASTER: OutputPin,
-    CS_SLAVE: OutputPin,
-    BUSY: InputPin + Wait,
-    DC: OutputPin,
-    RST: OutputPin,
-    EN: OutputPin,
+    Spi: SpiBus,
+    CsMaster: OutputPin,
+    CsSlave: OutputPin,
+    Busy: InputPin + Wait,
+    Dc: OutputPin,
+    Rst: OutputPin,
+    En: OutputPin,
 {
-    SPIError(SPI::Error),
-    CSMasterError(CS_MASTER::Error),
-    CSSlaveError(CS_SLAVE::Error),
-    BUSYError(BUSY::Error),
-    DCError(DC::Error),
-    RSTError(RST::Error),
-    ENError(EN::Error),
+    SpiError(Spi::Error),
+    CsMasterError(CsMaster::Error),
+    CsSlaveError(CsSlave::Error),
+    BusyError(Busy::Error),
+    DcError(Dc::Error),
+    RstError(Rst::Error),
+    EnError(En::Error),
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> core::fmt::Debug
-    for T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> core::fmt::Debug
+    for T133A01Error<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
-    SPI: SpiBus,
-    CS_MASTER: OutputPin,
-    CS_SLAVE: OutputPin,
-    BUSY: InputPin + Wait,
-    DC: OutputPin,
-    RST: OutputPin,
-    EN: OutputPin,
+    Spi: SpiBus,
+    CsMaster: OutputPin,
+    CsSlave: OutputPin,
+    Busy: InputPin + Wait,
+    Dc: OutputPin,
+    Rst: OutputPin,
+    En: OutputPin,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SPIError(x) => write!(f, "SPIError({:?})", x),
-            Self::CSMasterError(x) => write!(f, "CSMasterError({:?})", x),
-            Self::CSSlaveError(x) => write!(f, "CSSlaveError({:?})", x),
-            Self::BUSYError(x) => write!(f, "BUSYError({:?})", x),
-            Self::DCError(x) => write!(f, "DCError({:?})", x),
-            Self::RSTError(x) => write!(f, "RSTError({:?})", x),
-            Self::ENError(x) => write!(f, "ENError({:?})", x),
+            Self::SpiError(x) => write!(f, "SpiError({:?})", x),
+            Self::CsMasterError(x) => write!(f, "CsMasterError({:?})", x),
+            Self::CsSlaveError(x) => write!(f, "CsSlaveError({:?})", x),
+            Self::BusyError(x) => write!(f, "BusyError({:?})", x),
+            Self::DcError(x) => write!(f, "DcError({:?})", x),
+            Self::RstError(x) => write!(f, "RstError({:?})", x),
+            Self::EnError(x) => write!(f, "EnError({:?})", x),
         }
     }
 }
 
-pub struct T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> {
-    _spi: PhantomData<SPI>,
-    cs_master: CS_MASTER,
-    cs_slave: CS_SLAVE,
-    busy: BUSY,
-    dc: DC,
-    rst: RST,
-    en: EN,
+pub struct T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> {
+    _spi: PhantomData<Spi>,
+    cs_master: CsMaster,
+    cs_slave: CsSlave,
+    busy: Busy,
+    dc: Dc,
+    rst: Rst,
+    en: En,
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
-    T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
+    T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
-    CS_MASTER: OutputPin,
-    CS_SLAVE: OutputPin,
+    CsMaster: OutputPin,
+    CsSlave: OutputPin,
 {
-    /// `_spi` is taken only to fix `SPI` at the call site without
+    /// `_spi` is taken only to fix `Spi` at the call site without
     /// requiring a turbofish; the bus itself isn't stored.
     pub fn new(
-        _spi: &mut SPI,
-        cs_master: CS_MASTER,
-        cs_slave: CS_SLAVE,
-        busy: BUSY,
-        dc: DC,
-        rst: RST,
-        en: EN,
+        _spi: &mut Spi,
+        cs_master: CsMaster,
+        cs_slave: CsSlave,
+        busy: Busy,
+        dc: Dc,
+        rst: Rst,
+        en: En,
     ) -> Self {
         let mut cs_master = cs_master;
         cs_master.set_high().unwrap();
@@ -145,16 +145,16 @@ where
     }
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
-    T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
+    T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
-    SPI: SpiBus,
-    CS_MASTER: OutputPin,
-    CS_SLAVE: OutputPin,
-    BUSY: InputPin + Wait,
-    DC: OutputPin,
-    RST: OutputPin,
-    EN: OutputPin,
+    Spi: SpiBus,
+    CsMaster: OutputPin,
+    CsSlave: OutputPin,
+    Busy: InputPin + Wait,
+    Dc: OutputPin,
+    Rst: OutputPin,
+    En: OutputPin,
 {
     pub fn is_busy(&mut self) -> bool {
         self.busy.is_low().unwrap()
@@ -162,44 +162,44 @@ where
 
     async fn command(
         &mut self,
-        spi: &mut SPI,
+        spi: &mut Spi,
         controller: Controller,
         command: Command,
         data: impl IntoIterator<Item = u8>,
-    ) -> Result<(), T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>> {
+    ) -> Result<(), T133A01Error<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>> {
         // Assert chip select, pull low
         match controller {
             Controller::Master => self
                 .cs_master
                 .set_low()
-                .map_err(T133A01Error::CSMasterError)?,
+                .map_err(T133A01Error::CsMasterError)?,
             Controller::Slave => self
                 .cs_slave
                 .set_low()
-                .map_err(T133A01Error::CSSlaveError)?,
+                .map_err(T133A01Error::CsSlaveError)?,
             Controller::Both => {
                 self.cs_master
                     .set_low()
-                    .map_err(T133A01Error::CSMasterError)?;
+                    .map_err(T133A01Error::CsMasterError)?;
                 self.cs_slave
                     .set_low()
-                    .map_err(T133A01Error::CSSlaveError)?;
+                    .map_err(T133A01Error::CsSlaveError)?;
             }
         };
         // Write command
-        self.dc.set_high().map_err(T133A01Error::DCError)?;
+        self.dc.set_high().map_err(T133A01Error::DcError)?;
         spi.write(&[command.into()])
             .await
-            .map_err(T133A01Error::SPIError)?;
+            .map_err(T133A01Error::SpiError)?;
         // Write data
-        self.dc.set_low().map_err(T133A01Error::DCError)?;
+        self.dc.set_low().map_err(T133A01Error::DcError)?;
         if SINGLE_BYTE_WRITE {
             for val in data.into_iter() {
-                spi.write(&[val]).await.map_err(T133A01Error::SPIError)?;
+                spi.write(&[val]).await.map_err(T133A01Error::SpiError)?;
             }
         } else {
             for chunk in data.into_iter().chunks_heapless::<128>() {
-                spi.write(&chunk).await.map_err(T133A01Error::SPIError)?;
+                spi.write(&chunk).await.map_err(T133A01Error::SpiError)?;
             }
         }
         // Deassert chip select, pull high
@@ -207,37 +207,37 @@ where
             Controller::Master => self
                 .cs_master
                 .set_high()
-                .map_err(T133A01Error::CSMasterError)?,
+                .map_err(T133A01Error::CsMasterError)?,
             Controller::Slave => self
                 .cs_slave
                 .set_high()
-                .map_err(T133A01Error::CSSlaveError)?,
+                .map_err(T133A01Error::CsSlaveError)?,
             Controller::Both => {
                 self.cs_master
                     .set_high()
-                    .map_err(T133A01Error::CSMasterError)?;
+                    .map_err(T133A01Error::CsMasterError)?;
                 self.cs_slave
                     .set_high()
-                    .map_err(T133A01Error::CSSlaveError)?;
+                    .map_err(T133A01Error::CsSlaveError)?;
             }
         };
         Ok(())
     }
 }
 
-impl<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN> Panel<SPI>
-    for T133A01<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> Panel<Spi>
+    for T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
-    SPI: SpiBus,
-    CS_MASTER: OutputPin,
-    CS_SLAVE: OutputPin,
-    BUSY: InputPin + Wait,
-    DC: OutputPin,
-    RST: OutputPin,
-    EN: OutputPin,
+    Spi: SpiBus,
+    CsMaster: OutputPin,
+    CsSlave: OutputPin,
+    Busy: InputPin + Wait,
+    Dc: OutputPin,
+    Rst: OutputPin,
+    En: OutputPin,
 {
     type Color = Spectra6Color;
-    type Error = T133A01Error<SPI, CS_MASTER, CS_SLAVE, BUSY, DC, RST, EN>;
+    type Error = T133A01Error<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>;
     type InitMode = ();
 
     const WIDTH: usize = PANEL_WIDTH;
@@ -259,25 +259,25 @@ where
     }
 
     async fn enable(&mut self) -> Result<(), Self::Error> {
-        self.en.set_high().map_err(T133A01Error::ENError)
+        self.en.set_high().map_err(T133A01Error::EnError)
     }
 
     async fn disable(&mut self) -> Result<(), Self::Error> {
-        self.en.set_low().map_err(T133A01Error::ENError)
+        self.en.set_low().map_err(T133A01Error::EnError)
     }
 
     async fn reset(&mut self) -> Result<(), Self::Error> {
         // TODO: Can I lower these to 10ms?
-        self.rst.set_high().map_err(T133A01Error::RSTError)?;
+        self.rst.set_high().map_err(T133A01Error::RstError)?;
         Timer::after(Duration::from_millis(20)).await;
-        self.rst.set_low().map_err(T133A01Error::RSTError)?;
+        self.rst.set_low().map_err(T133A01Error::RstError)?;
         Timer::after(Duration::from_millis(20)).await;
-        self.rst.set_high().map_err(T133A01Error::RSTError)?;
+        self.rst.set_high().map_err(T133A01Error::RstError)?;
         Timer::after(Duration::from_millis(20)).await;
         Ok(())
     }
 
-    async fn init(&mut self, spi: &mut SPI, _mode: Self::InitMode) -> Result<(), Self::Error> {
+    async fn init(&mut self, spi: &mut Spi, _mode: Self::InitMode) -> Result<(), Self::Error> {
         // NOTE: Call after reset
         self.command(
             spi,
@@ -346,14 +346,14 @@ where
         Ok(())
     }
 
-    async fn power_on(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
+    async fn power_on(&mut self, spi: &mut Spi) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::PowerOn, [])
             .await?;
         self.wait_until_idle().await?;
         Ok(())
     }
 
-    async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
+    async fn power_off(&mut self, spi: &mut Spi) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::PowerOff, [0x00])
             .await?;
         self.wait_until_idle().await?;
@@ -362,7 +362,7 @@ where
 
     async fn update_frame(
         &mut self,
-        spi: &mut SPI,
+        spi: &mut Spi,
         pixels: impl IntoIterator<Item = Self::Color> + Clone,
     ) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::CCSET, [0x01])
@@ -381,7 +381,7 @@ where
         Ok(())
     }
 
-    async fn display_frame_no_wait(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
+    async fn display_frame_no_wait(&mut self, spi: &mut Spi) -> Result<(), Self::Error> {
         self.command(spi, Controller::Both, Command::DisplayRefresh, [0x01])
             .await
     }
@@ -390,6 +390,6 @@ where
         self.busy
             .wait_for_high()
             .await
-            .map_err(T133A01Error::BUSYError)
+            .map_err(T133A01Error::BusyError)
     }
 }
