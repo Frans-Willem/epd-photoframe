@@ -18,8 +18,9 @@ use esp_println::println;
 
 use crate::battery;
 use crate::button::wait_for_press;
+use crate::config::Config;
 use crate::error_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
+use crate::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction};
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::sht40;
@@ -170,7 +171,7 @@ impl From<String> for FetchError {
 /// white pre-flash that `main()`'s `run_normal_boot` may have kicked
 /// off, then deep-sleep waking on either the `Refresh:` interval (or
 /// the fallback timer) or a button press.
-pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
+pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
     let HardwareCtx {
         rtc,
         wake_action,
@@ -202,7 +203,7 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let current_url: String = CURRENT_URL
         .get()
         .map(|s| String::from(s.as_str()))
-        .unwrap_or_else(|| creds.base_url.clone());
+        .unwrap_or_else(|| config.get_image_url().ok().flatten().unwrap_or_default());
     let current_url: String = match wake_action {
         WakeAction::Timer => match REDIRECT_URL.take() {
             Some(r) => {
@@ -245,7 +246,7 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), FetchError> = {
         let base_url_ref = current_url.as_str();
         let wifi_result =
-            single_shot_wifi::run(wifi, &creds, WIFI_LINK_TIMEOUT, |stack| async move {
+            single_shot_wifi::run(wifi, &mut config, WIFI_LINK_TIMEOUT, |stack| async move {
                 let battery_mv = BATTERY_MV.wait().await;
                 let battery_pct = battery::mv_to_percentage(battery_mv);
                 let temp_humidity = TEMP_HUMIDITY.wait().await;
@@ -285,7 +286,9 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
             .await;
         match wifi_result {
             Ok(inner) => inner,
-            Err(e) => Err(FetchError::from(e.message(&creds.ssid))),
+            Err(e) => Err(FetchError::from(
+                e.message(&config.get_wifi_ssid().ok().flatten().unwrap_or_default()),
+            )),
         }
     };
 
