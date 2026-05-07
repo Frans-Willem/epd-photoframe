@@ -272,16 +272,17 @@ where
 /// failure the runner reconfigures the controller with it and retries
 /// once before surfacing the error. `None` means "the initial config
 /// is the only one to try" — failures go straight to `status.signal`.
-/// The slot is `take()`n on use, so the fallback fires at most once
-/// per session.
+/// The slot is `take()`n on each loop iteration so the fallback fires
+/// at most once per session even if a successful `Ok` re-arms the
+/// reconnect path.
 async fn wifi_runner<'d>(
     status: &WifiStatus,
     mut controller: esp_radio::wifi::WifiController<'d>,
     mut fallback_config: Option<esp_radio::wifi::Config>,
 ) -> ! {
     loop {
-        match controller.connect_async().await {
-            Ok(_) => {
+        match (controller.connect_async().await, fallback_config.take()) {
+            (Ok(_), _) => {
                 // Cache the AP we just associated with so the next
                 // boot can pin BSSID + channel and skip the scan.
                 // Failure to read ap_info is non-fatal — we just
@@ -315,14 +316,14 @@ async fn wifi_runner<'d>(
                 );
                 Timer::after(POST_DISCONNECT_PAUSE).await;
             }
-            Err(e) if fallback_config.is_some() => {
+            (Err(e), Some(fb)) => {
                 // Stale hint? Drop the BSSID/channel pin and retry
                 // immediately with the no-hint config — that scan
                 // will find the AP wherever it actually lives now.
-                // `take()` ensures the fallback fires at most once
-                // per session: if the no-hint attempt also fails,
-                // we go down the normal signal-error path.
-                let fb = fallback_config.take().unwrap();
+                // If the no-hint attempt also fails on the next
+                // iteration, `fallback_config` is already `None`,
+                // so we'll match the (Err, None) arm and surface
+                // the error normally.
                 println!(
                     "WiFi connect with cached hint failed: {:?}; falling back to scan",
                     e
@@ -333,7 +334,7 @@ async fn wifi_runner<'d>(
                     Timer::after(RECONNECT_RETRY_DELAY).await;
                 }
             }
-            Err(e) => {
+            (Err(e), None) => {
                 println!(
                     "WiFi connect failed: {:?}, retry in {} s",
                     e,
