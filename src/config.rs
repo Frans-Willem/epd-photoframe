@@ -81,15 +81,26 @@ impl<'d> Config<'d> {
     }
 
     pub fn set_wifi_ssid(&mut self, v: &str) -> Result<(), Error> {
-        self.nvs.borrow_mut().set(&NS, &K_WIFI_SSID, v)?;
         // The hint is tied to the credentials it was learned with;
-        // rewriting either of them invalidates it.
-        self.clear_wifi_hint()
+        // rewriting either of them invalidates it. Clear *before*
+        // writing the new value so a power cut between the two
+        // writes can't leave new creds paired with a stale hint —
+        // the safe intermediate state is "old SSID + no hint", which
+        // falls back cleanly to a scan on the next connect. Skip the
+        // work entirely when the SSID isn't actually changing.
+        if self.get_wifi_ssid()?.as_deref() != Some(v) {
+            self.clear_wifi_hint()?;
+        }
+        self.nvs.borrow_mut().set(&NS, &K_WIFI_SSID, v)
     }
 
     pub fn set_wifi_password(&mut self, v: &str) -> Result<(), Error> {
-        self.nvs.borrow_mut().set(&NS, &K_WIFI_PASS, v)?;
-        self.clear_wifi_hint()
+        // Same clear-before-write ordering and skip-if-unchanged as
+        // `set_wifi_ssid`; see that method for the rationale.
+        if self.get_wifi_password()?.as_deref() != Some(v) {
+            self.clear_wifi_hint()?;
+        }
+        self.nvs.borrow_mut().set(&NS, &K_WIFI_PASS, v)
     }
 
     pub fn set_image_url(&mut self, v: &str) -> Result<(), Error> {
