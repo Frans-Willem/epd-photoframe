@@ -82,10 +82,7 @@ pub async fn enter_measurement_mode<B: I2c>(mut i2c: B) -> B {
         return i2c;
     }
     let new_reg05 = reg05[0] & !REG05_WATCHDOG_MASK;
-    if let Err(e) = i2c
-        .write(I2C_ADDR, &[REG_CHARGE_TERM, new_reg05])
-        .await
-    {
+    if let Err(e) = i2c.write(I2C_ADDR, &[REG_CHARGE_TERM, new_reg05]).await {
         println!("SY6974B REG05 write failed: {:?}", e);
         return i2c;
     }
@@ -103,10 +100,7 @@ pub async fn enter_measurement_mode<B: I2c>(mut i2c: B) -> B {
         return i2c;
     }
     let new_reg00 = reg00[0] | REG00_EN_HIZ;
-    if let Err(e) = i2c
-        .write(I2C_ADDR, &[REG_INPUT_SOURCE, new_reg00])
-        .await
-    {
+    if let Err(e) = i2c.write(I2C_ADDR, &[REG_INPUT_SOURCE, new_reg00]).await {
         println!("SY6974B REG00 write failed: {:?}", e);
         return i2c;
     }

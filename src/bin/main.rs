@@ -116,7 +116,6 @@ fn determine_wake_action(
     }
 }
 
-
 #[embassy_executor::task]
 async fn blink_task(mut led: Output<'static>) {
     loop {
