@@ -125,26 +125,42 @@ where
     // starts the radio in station mode with the supplied credentials. ---
     //
     // If we have a cached BSSID + channel from a prior successful
-    // association, pin them both — the radio skips the scan and goes
-    // straight to that AP. Take()n out of the slot so a failed
-    // association doesn't lock us into retrying with a stale hint;
-    // a fresh one is written back after a successful connect.
+    // association, pin them both for the *initial* attempt — the
+    // radio skips the scan and goes straight to that AP. Take()n out
+    // of the slot so a failed association doesn't lock us into
+    // retrying with a stale hint; a fresh one is written back after
+    // a successful connect.
+    //
+    // Build a no-hint fallback config in parallel: if the hint-pinned
+    // attempt fails (AP changed channel/BSSID, or moved entirely), the
+    // runner reconfigures the controller with this and retries once,
+    // so a stale hint costs an extra connect-attempt's worth of time
+    // rather than a whole error-frame cycle.
     let hint = WIFI_HINT.take();
-    let mut sta_cfg = esp_radio::wifi::sta::StationConfig::default()
+    let used_hint = hint.is_some();
+    let base_sta_cfg = esp_radio::wifi::sta::StationConfig::default()
         .with_ssid(creds.ssid.as_str())
         .with_password(creds.password.as_str().into());
-    if let Some(h) = hint {
-        sta_cfg = sta_cfg.with_bssid(h.bssid).with_channel(h.channel);
-        println!(
-            "WiFi hint: BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, channel {}",
-            h.bssid[0], h.bssid[1], h.bssid[2], h.bssid[3], h.bssid[4], h.bssid[5], h.channel
-        );
-    } else {
-        println!("WiFi hint: none (cold boot or stale; will scan)");
-    }
-    let station_config = esp_radio::wifi::Config::Station(sta_cfg);
+    let initial_sta_cfg = match &hint {
+        Some(h) => {
+            println!(
+                "WiFi hint: BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, channel {}",
+                h.bssid[0], h.bssid[1], h.bssid[2], h.bssid[3], h.bssid[4], h.bssid[5], h.channel
+            );
+            base_sta_cfg
+                .clone()
+                .with_bssid(h.bssid)
+                .with_channel(h.channel)
+        }
+        None => {
+            println!("WiFi hint: none (cold boot or stale; will scan)");
+            base_sta_cfg.clone()
+        }
+    };
+    let initial_config = esp_radio::wifi::Config::Station(initial_sta_cfg);
+    let fallback_config = esp_radio::wifi::Config::Station(base_sta_cfg);
     let controller_config =
-        esp_radio::wifi::ControllerConfig::default().with_initial_config(station_config);
+        esp_radio::wifi::ControllerConfig::default().with_initial_config(initial_config);
     let (controller, interfaces) =
         esp_radio::wifi::new(wifi, controller_config).map_err(Error::Init)?;
 
@@ -155,7 +171,7 @@ where
     // reconnecting silently.
     match select(
         run_with_wifi(&status, interfaces, timeout, f),
-        wifi_runner(&status, controller),
+        wifi_runner(&status, controller, fallback_config, used_hint),
     )
     .await
     {
@@ -238,10 +254,19 @@ where
 /// keep the radio connected. Signals `status` once on each (re)connect
 /// so the main work can gate on the *initial* association; mid-session
 /// disconnects trigger a silent reconnect.
+///
+/// If the initial association used a cached BSSID/channel hint and it
+/// fails, the runner reconfigures the controller with `fallback_config`
+/// (no hint) and retries once before surfacing the error to the main
+/// task. After that single fallback, normal "signal-and-retry-after-
+/// delay" behaviour resumes.
 async fn wifi_runner<'d>(
     status: &WifiStatus,
     mut controller: esp_radio::wifi::WifiController<'d>,
+    fallback_config: esp_radio::wifi::Config,
+    initial_attempt_used_hint: bool,
 ) -> ! {
+    let mut hint_in_use = initial_attempt_used_hint;
     loop {
         match controller.connect_async().await {
             Ok(_) => {
@@ -277,6 +302,26 @@ async fn wifi_runner<'d>(
                     POST_DISCONNECT_PAUSE.as_millis()
                 );
                 Timer::after(POST_DISCONNECT_PAUSE).await;
+            }
+            Err(e) if hint_in_use => {
+                // Stale hint? Drop the BSSID/channel pin and retry
+                // immediately with the no-hint config — that scan
+                // will find the AP wherever it actually lives now.
+                // Only one fallback per session: if the no-hint
+                // attempt also fails, we go down the normal
+                // signal-error path.
+                println!(
+                    "WiFi connect with cached hint failed: {:?}; falling back to scan",
+                    e
+                );
+                if let Err(ce) = controller.set_config(&fallback_config) {
+                    println!("set_config to fallback failed: {:?}", ce);
+                    status.signal(Err(ce));
+                    Timer::after(RECONNECT_RETRY_DELAY).await;
+                    hint_in_use = false;
+                    continue;
+                }
+                hint_in_use = false;
             }
             Err(e) => {
                 println!(
