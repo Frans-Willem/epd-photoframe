@@ -63,6 +63,77 @@ Active cycle waveform
 | Panel transition   | 12 – 41 s    | ~180–330 mA  | matches the panel's ~20 s e-ink refresh   |
 | Deep sleep         | 42 s onward  | ~250 µA      |                                           |
 
+Active-phase optimisations — considered, parked
+------------------------------------------------
+
+Once the deep-sleep floor was at the ESP32-S3 hard floor (~250 µA),
+sleep started dominating the daily budget at the typical 1/day refresh
+— **22 of 32 mWh/day, ~70%**. That sets a hard ceiling on what
+active-phase tuning can achieve at this duty cycle:
+
+> Even reducing the entire active phase to zero only extends battery
+> life from ~575 → ~833 days. **Anything we do to active is at most a
+> ~45% gain at 1/day.** Realistic combinations top out around +5–10%.
+
+Two candidate optimisations were investigated; neither shipped.
+
+### White pre-flash → buzzer beep (measured)
+
+The white pre-flash gives ~1 s of immediate visual feedback after a
+button press by kicking off an all-white panel refresh in parallel
+with WiFi fetch. PPK2 measurement of three runs (60 s cold-boot
+captures, `disable_charger` build, 3700 mV):
+
+| Variant | Active-phase energy |
+|---------|---------------------|
+| Stock (with pre-flash), run 1   | 9.413 mWh |
+| Stock (with pre-flash), run 2   | 9.155 mWh |
+| Pre-flash skipped (no feedback) | 8.836 mWh |
+| Buzzer beep instead (80 ms)     | 8.870 mWh |
+
+Pre-flash costs **~0.4 mWh per cycle (~4–5%)** — mostly from the panel
+HV booster running concurrently with WiFi for ~6 s, plus a ~1.4 s
+longer wall-clock cycle. The buzzer alternative (already on hardware
+at GPIO45 via LEDC, used by config_mode) costs ~0.04 mWh — within
+run-to-run noise of the no-feedback case. Net saving from swapping
+would be the full ~0.4 mWh.
+
+At 1/day on the 5000 mAh cell that's **~595 vs ~587 days (+8 days,
++1.4%)**. Not worth the UX trade (silent visual cue → audible chirp)
+for that gain.
+
+### Network phase (theoretical)
+
+WiFi assoc + DHCP + HTTP fetch is t=2–10 s in the cycle waveform,
+~250 mA mean → **~2.05 mWh per cycle (~22% of active energy)**. The
+levers, in rough order of plausible upside (un-benched estimates):
+
+| Lever | Saved/cycle | Notes |
+|-------|-------------|-------|
+| Halve image size (server-side PNG re-encode)         | ~0.4 mWh | 547 KB at 4-color indexed is ~2.3 bpp vs ~2 bpp floor. |
+| Fast WiFi reconnect (cached BSSID + channel in NVS)  | ~0.25–0.5 mWh | Skips full scan on subsequent associations. |
+| Static IP (skip DHCP)                                | ~0.26 mWh | Brittle — LAN reorg breaks the device until reflashed. |
+| HTTP `If-Modified-Since` / `ETag` → 304              | ~1.5 mWh | Only when the server actually returns 304. |
+
+Combined plausible "all easy wins" ≈ 1.5 mWh/cycle, daily total 31.5
+→ 30.0 mWh/day, battery life 587 → 617 days (**+30 days, +5%** at
+1/day). Theoretical max with 304 caching layered on top ≈ 3 mWh/cycle,
+~+10%.
+
+### Why none of it shipped
+
+A 1.4 mWh/cycle theoretical maximum saving at 1 refresh/day buys
+~10% extra battery life on top of an already-580+-day baseline. None
+of the levers are free — image-size and 304 caching are server-side
+work, static IP adds a maintenance footgun, fast reconnect is hard
+to benchmark reliably. Below the ESP32-S3 sleep floor would require
+external hardware (e.g. RTC-controlled rail cut).
+
+**Fast WiFi reconnect** is the one item kept in mind — if a cheap
+implementation surfaces (esp-radio knob, NVS-cached BSSID/channel),
+it's worth picking up. Bench it with 5+ cycles per variant against
+a stable AP; single-cycle deltas are below run-to-run noise.
+
 Bench setup notes
 -----------------
 
