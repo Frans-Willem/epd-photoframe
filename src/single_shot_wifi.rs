@@ -19,41 +19,60 @@
 //! - `NETWORK_RESOURCES`/`WIFI<'static>` are single-shot — they can
 //!   be given to this function exactly once per boot.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use esp_println::println;
 
-use crate::hardware::WifiCredentials;
+use crate::config::Config;
 use crate::net_resources::NETWORK_RESOURCES;
-use crate::rtc_persisted::RtcPersisted;
 
 /// Cached BSSID + channel of the AP we last associated with. Pinning
 /// both at the next association lets the radio go straight to that
 /// channel and AP without scanning, shaving ~1–2 s off the connect
-/// phase. The slot is `take()`n at use, then re-`set()` on success.
-/// If the pinned attempt fails, `wifi_runner` retries once with a
-/// no-hint fallback config in the same session, so a stale hint
-/// only costs an extra connect-attempt's worth of time.
-/// `RtcPersisted`'s magic gate handles the cold-boot "all zeros =
-/// no hint" case.
-#[esp_hal::ram(unstable(rtc_slow, persistent))]
-static WIFI_HINT: RtcPersisted<WifiHint> = RtcPersisted::new();
-
-#[derive(Clone, Copy)]
-struct WifiHint {
+/// phase. Persisted as an opaque byte blob by the [`WifiCredStore`]
+/// alongside the credentials it was learned with: when those
+/// credentials are rewritten the store also drops the hint, so a
+/// stale one can't survive a network change. If the pinned attempt
+/// fails anyway (AP roamed channel or BSSID), `wifi_runner` retries
+/// once with a no-hint fallback config in the same session, so the
+/// worst case is one extra connect-attempt's worth of time.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct WifiHint {
     bssid: [u8; 6],
     channel: u8,
 }
 
-/// Drop any cached BSSID/channel. Call from `config_mode` when the
-/// stored WiFi credentials are written: a fresh SSID/password may
-/// belong to a different AP, in which case the previous hint would
-/// fail and force a fallback scan on every wake until the slot
-/// gets overwritten with a fresh hint anyway.
-pub fn clear_hint() {
-    WIFI_HINT.clear();
+/// Wire format for the persisted hint: 6 BSSID bytes followed by 1
+/// channel byte. The store sees only `Vec<u8>` so [`Config`] doesn't
+/// need to know what's inside — corruption recovery (wrong-length
+/// blob) lives on the decode side via `TryFrom`.
+impl From<WifiHint> for Vec<u8> {
+    fn from(h: WifiHint) -> Vec<u8> {
+        let mut v = Vec::with_capacity(7);
+        v.extend_from_slice(&h.bssid);
+        v.push(h.channel);
+        v
+    }
+}
+
+impl TryFrom<Vec<u8>> for WifiHint {
+    type Error = ();
+    fn try_from(b: Vec<u8>) -> Result<Self, ()> {
+        if b.len() != 7 {
+            return Err(());
+        }
+        let mut bssid = [0u8; 6];
+        bssid.copy_from_slice(&b[..6]);
+        Ok(WifiHint {
+            bssid,
+            channel: b[6],
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -67,6 +86,13 @@ pub enum Error {
     /// The whole setup phase (connect + pause + DHCP) didn't finish
     /// within the supplied timeout.
     Timeout,
+    /// The credential store returned an error reading SSID / password
+    /// (flash trouble, malformed entry).
+    CredentialsError,
+    /// The credential store returned `None` for a required field
+    /// (SSID or password). `is_configured` should normally rule this
+    /// out before `run` is called.
+    EmptyCredentials,
 }
 
 impl Error {
@@ -79,6 +105,8 @@ impl Error {
             Error::Init(e) => format!("WiFi init failed: {:?}", e),
             Error::Connect(e) => format!("WiFi connect failed: {:?}\nSSID: {}", e, ssid),
             Error::Timeout => format!("WiFi setup timed out\nSSID: {}", ssid),
+            Error::CredentialsError => format!("WiFi credentials read failed"),
+            Error::EmptyCredentials => format!("WiFi credentials missing"),
         }
     }
 }
@@ -107,18 +135,60 @@ const POST_DISCONNECT_PAUSE: Duration = Duration::from_millis(500);
 /// signal just overwrites itself each time).
 type WifiStatus = Signal<NoopRawMutex, Result<(), esp_radio::wifi::WifiError>>;
 
+/// Abstraction over "the place WiFi credentials + the BSSID/channel
+/// hint live". Implemented by [`Config`] (the NVS-backed store) for
+/// the production path; the indirection keeps `single_shot_wifi`
+/// independent of the storage details and makes the connect path
+/// testable with a mock. The `WifiHint` ↔ byte conversion lives in
+/// the impl so the store sees only opaque bytes.
+pub trait WifiCredStore {
+    fn get_ssid(&self) -> Result<String, Error>;
+    fn get_password(&self) -> Result<String, Error>;
+    fn get_hint(&self) -> Result<Option<WifiHint>, Error>;
+    fn set_hint(&mut self, hint: WifiHint) -> Result<(), Error>;
+}
+
+impl<'a> WifiCredStore for Config<'a> {
+    fn get_ssid(&self) -> Result<String, Error> {
+        self.get_wifi_ssid()
+            .map_err(|_| Error::CredentialsError)?
+            .ok_or(Error::EmptyCredentials)
+    }
+    fn get_password(&self) -> Result<String, Error> {
+        self.get_wifi_password()
+            .map_err(|_| Error::CredentialsError)?
+            .ok_or(Error::EmptyCredentials)
+    }
+    fn get_hint(&self) -> Result<Option<WifiHint>, Error> {
+        // A wrong-length blob (corrupt entry, schema change) is
+        // treated as "no hint" rather than a hard error: the next
+        // successful connect overwrites it.
+        Ok(self
+            .get_wifi_hint()
+            .map_err(|_| Error::CredentialsError)?
+            .and_then(|bytes| WifiHint::try_from(bytes).ok()))
+    }
+    fn set_hint(&mut self, hint: WifiHint) -> Result<(), Error> {
+        // esp-nvs short-circuits when the stored bytes already match,
+        // so calling this every successful connect is fine.
+        self.set_wifi_hint(&Vec::from(hint))
+            .map_err(|_| Error::CredentialsError)
+    }
+}
+
 /// Bring up WiFi + embassy-net for one fetch cycle and run `f` with
 /// the live `Stack`. See the module docs for the lifecycle / timeout
 /// contract.
-pub async fn run<'d, T, Fut, F>(
+pub async fn run<'d, T, Fut, F, S>(
     wifi: esp_hal::peripherals::WIFI<'d>,
-    creds: &WifiCredentials,
+    creds: &mut S,
     connect_timeout: Duration,
     f: F,
 ) -> Result<T, Error>
 where
     F: FnOnce(embassy_net::Stack<'static>) -> Fut,
     Fut: core::future::Future<Output = T>,
+    S: WifiCredStore + ?Sized,
 {
     // Signal carrying the initial association outcome from
     // `wifi_runner` to `run_with_wifi`. Lives on the stack for the
@@ -134,22 +204,20 @@ where
     // --- Construct the controller. `ControllerConfig::initial_config`
     // starts the radio in station mode with the supplied credentials. ---
     //
-    // If we have a cached BSSID + channel from a prior successful
-    // association, pin them both for the *initial* attempt — the
-    // radio skips the scan and goes straight to that AP. Take()n out
-    // of the slot so a failed association doesn't lock us into
-    // retrying with a stale hint; a fresh one is written back after
-    // a successful connect.
+    // If the credential store has a cached BSSID + channel from a
+    // prior successful association, pin them both for the *initial*
+    // attempt — the radio skips the scan and goes straight to that AP.
     //
     // Build a no-hint fallback config in parallel: if the hint-pinned
     // attempt fails (AP changed channel/BSSID, or moved entirely), the
-    // runner reconfigures the controller with this and retries once,
-    // so a stale hint costs an extra connect-attempt's worth of time
-    // rather than a whole error-frame cycle.
-    let hint = WIFI_HINT.take();
+    // runner reconfigures the controller with it and retries once, so
+    // a stale hint costs an extra connect-attempt's worth of time
+    // rather than a whole error-frame cycle. A fresh hint is written
+    // back to the store after every successful connect.
+    let hint = creds.get_hint().ok().flatten();
     let base_sta_cfg = esp_radio::wifi::sta::StationConfig::default()
-        .with_ssid(creds.ssid.as_str())
-        .with_password(creds.password.as_str().into());
+        .with_ssid(creds.get_ssid()?.as_str())
+        .with_password(creds.get_password()?.as_str().into());
     let (initial_sta_cfg, fallback_config) = match hint {
         Some(h) => {
             println!(
@@ -180,10 +248,12 @@ where
 
     // Phases 1 (associate) through 3 (f) all run concurrently with
     // `wifi_runner`, which handles mid-session disconnects by
-    // reconnecting silently.
+    // reconnecting silently. Only `wifi_runner` borrows `creds`
+    // (to write the fresh hint after each successful connect), so
+    // the `&mut creds` doesn't conflict with `run_with_wifi`.
     match select(
         run_with_wifi(&status, interfaces, timeout, f),
-        wifi_runner(&status, controller, fallback_config),
+        wifi_runner(creds, &status, controller, fallback_config),
     )
     .await
     {
@@ -275,7 +345,8 @@ where
 /// The slot is `take()`n on each loop iteration so the fallback fires
 /// at most once per session even if a successful `Ok` re-arms the
 /// reconnect path.
-async fn wifi_runner<'d>(
+async fn wifi_runner<'d, S: WifiCredStore + ?Sized>(
+    creds: &mut S,
     status: &WifiStatus,
     mut controller: esp_radio::wifi::WifiController<'d>,
     mut fallback_config: Option<esp_radio::wifi::Config>,
@@ -295,10 +366,16 @@ async fn wifi_runner<'d>(
                             info.bssid[3], info.bssid[4], info.bssid[5],
                             info.channel
                         );
-                        WIFI_HINT.set(WifiHint {
+                        // We're already associated; a hint-write
+                        // failure is not worth dropping the connection
+                        // for — the worst case is the next boot does
+                        // a no-hint scan.
+                        if let Err(e) = creds.set_hint(WifiHint {
                             bssid: info.bssid,
                             channel: info.channel,
-                        });
+                        }) {
+                            println!("set_hint failed; not caching hint: {:?}", e);
+                        }
                     }
                     Err(e) => println!("ap_info() failed; not caching hint: {:?}", e),
                 }

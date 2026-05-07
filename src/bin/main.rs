@@ -25,7 +25,7 @@ extern crate alloc;
 
 use epd_photoframe::config::Config;
 use epd_photoframe::config_mode;
-use epd_photoframe::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction, WifiCredentials};
+use epd_photoframe::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction};
 use epd_photoframe::panel::{Panel, PanelColor};
 use epd_photoframe::panic_mode;
 
@@ -217,31 +217,25 @@ async fn main(spawner: Spawner) -> ! {
     // offset/size) or actual flash hardware trouble — panicking there is
     // the right call. A missing *key* is different: that's how we detect
     // "needs configuring" and short-circuit into config mode below.
-    let mut config =
+    let config =
         Config::new(peripherals.FLASH).expect("NVS init failed — check partition table and flash");
-    let creds = match (
-        config.wifi_ssid().ok().flatten(),
-        config.wifi_password().ok().flatten(),
-        config.image_url().ok().flatten(),
-    ) {
-        (Some(ssid), Some(password), Some(base_url)) => {
-            println!(
-                "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?}",
-                ssid,
-                password.len(),
-                base_url
-            );
-            Some(WifiCredentials {
-                ssid,
-                password,
-                base_url,
-            })
-        }
-        _ => {
-            println!("NVS config incomplete; forcing config mode");
-            None
-        }
-    };
+    if config.is_configured().unwrap_or(false) {
+        let has_hint = config.get_wifi_hint().ok().flatten().is_some();
+        println!(
+            "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?} wifi.hint={}",
+            config.get_wifi_ssid().ok().flatten().as_deref().unwrap_or(""),
+            config
+                .get_wifi_password()
+                .ok()
+                .flatten()
+                .map(|p| p.len())
+                .unwrap_or(0),
+            config.get_image_url().ok().flatten().as_deref().unwrap_or(""),
+            if has_hint { "present" } else { "none" },
+        );
+    } else {
+        println!("NVS config incomplete; forcing config mode");
+    }
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_ints =
@@ -383,7 +377,7 @@ async fn main(spawner: Spawner) -> ! {
     if let Some(panic_msg) = panic_mode::take_pending_message() {
         panic_mode::run(hw, panic_msg.as_str()).await
     } else {
-        run_normal_boot(hw, creds, config).await
+        run_normal_boot(hw, config).await
     }
 }
 
@@ -397,7 +391,6 @@ async fn main(spawner: Spawner) -> ! {
 /// implicitly only runs on the other arm".
 async fn run_normal_boot(
     mut hw: HardwareCtx,
-    creds: Option<WifiCredentials>,
     config: Config<'static>,
 ) -> ! {
     // Past the panic-render decision: any panic from here on is
@@ -449,7 +442,7 @@ async fn run_normal_boot(
     // we enter configuration mode. If either (or both) was never pressed,
     // `wait_for_high` resolves immediately because the pin is already high,
     // so normally this block completes in microseconds.
-    let entering_config_mode = creds.is_none() || {
+    let entering_config_mode = !config.is_configured().unwrap_or(false) || {
         let mut prev_input = Input::new(
             hw.gpio_btn_previous.reborrow(),
             InputConfig::default().with_pull(Pull::Up),
@@ -469,10 +462,8 @@ async fn run_normal_boot(
         )
     };
 
-    if let Some(creds) = creds
-        && !entering_config_mode
-    {
-        epd_photoframe::normal_mode::run(hw, creds).await
+    if !entering_config_mode {
+        epd_photoframe::normal_mode::run(hw, config).await
     } else {
         // Entering config mode is a deliberate reset of the device's
         // "what's displayed" state — whatever URL was committed last

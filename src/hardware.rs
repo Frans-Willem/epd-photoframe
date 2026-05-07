@@ -3,8 +3,6 @@
 //! needs to cfg-gate on the panel model or care about pin counts — they
 //! see the same `EpdPanel` alias and the same field set.
 
-use alloc::string::String;
-
 use embassy_executor::Spawner;
 use esp_hal::gpio::{AnyPin, Output};
 use esp_hal::spi::master::Spi;
@@ -123,12 +121,4 @@ pub struct HardwareCtx {
     /// Always populated — both E1002 and E1004 have the piezo on the
     /// same pin per Seeed's E10xx ESPHome reference.
     pub buzzer: Buzzer,
-}
-
-/// Credentials + URL for the normal flow. Deliberately split out of
-/// `HardwareCtx` because config mode doesn't need them.
-pub struct WifiCredentials {
-    pub ssid: String,
-    pub password: String,
-    pub base_url: String,
 }

@@ -47,10 +47,10 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // password gives the form a "keep existing" sentinel; otherwise
     // (brand-new device or prior open-network config) the field starts
     // empty and whatever the user submits gets saved as-is.
-    let stored_ssid = nvs.wifi_ssid().ok().flatten().unwrap_or_default();
-    let stored_url = nvs.image_url().ok().flatten().unwrap_or_default();
+    let stored_ssid = nvs.get_wifi_ssid().ok().flatten().unwrap_or_default();
+    let stored_url = nvs.get_image_url().ok().flatten().unwrap_or_default();
     let password_is_set = nvs
-        .wifi_password()
+        .get_wifi_password()
         .ok()
         .flatten()
         .is_some_and(|p| !p.is_empty());
@@ -152,10 +152,10 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
             if let Err(e) = nvs.set_image_url(&creds.url) {
                 println!("WARNING: failed to write image.url: {:?}", e);
             }
-            // Any cached BSSID/channel belonged to the *previous*
-            // SSID; if creds just changed it's stale, so drop it
-            // and let the next boot scan fresh.
-            crate::single_shot_wifi::clear_hint();
+            // Any cached BSSID/channel belonging to a prior network is
+            // dropped automatically by the SSID/password setters above;
+            // no separate invalidation step needed.
+            //
             // Give the HTTP response a moment to flush before we reboot.
             Timer::after(Duration::from_millis(500)).await;
         }
