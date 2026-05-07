@@ -110,12 +110,54 @@ impl ChromaColor {
 /// integer; the resulting closest-anchor classifier agrees with all
 /// 96 (palette × colour) reference rows.
 const SPECTRA_6_CHROMA_ANCHORS: &[(ChromaColor, Spectra6Color)] = &[
-    (ChromaColor { x:  -30, y:  -36, v:  93 }, Spectra6Color::Black),
-    (ChromaColor { x:  -42, y:  -13, v: 451 }, Spectra6Color::White),
-    (ChromaColor { x:  239, y:  402, v: 450 }, Spectra6Color::Yellow),
-    (ChromaColor { x:  310, y:   16, v: 328 }, Spectra6Color::Red),
-    (ChromaColor { x: -268, y: -195, v: 369 }, Spectra6Color::Blue),
-    (ChromaColor { x: -100, y:  121, v: 301 }, Spectra6Color::Green),
+    (
+        ChromaColor {
+            x: -30,
+            y: -36,
+            v: 93,
+        },
+        Spectra6Color::Black,
+    ),
+    (
+        ChromaColor {
+            x: -42,
+            y: -13,
+            v: 451,
+        },
+        Spectra6Color::White,
+    ),
+    (
+        ChromaColor {
+            x: 239,
+            y: 402,
+            v: 450,
+        },
+        Spectra6Color::Yellow,
+    ),
+    (
+        ChromaColor {
+            x: 310,
+            y: 16,
+            v: 328,
+        },
+        Spectra6Color::Red,
+    ),
+    (
+        ChromaColor {
+            x: -268,
+            y: -195,
+            v: 369,
+        },
+        Spectra6Color::Blue,
+    ),
+    (
+        ChromaColor {
+            x: -100,
+            y: 121,
+            v: 301,
+        },
+        Spectra6Color::Green,
+    ),
 ];
 
 pub struct SpectraPacker<T>(pub T);
@@ -149,4 +191,3 @@ pub fn test_screen(width: usize, height: usize) -> impl Iterator<Item = Spectra6
         }
     })
 }
-

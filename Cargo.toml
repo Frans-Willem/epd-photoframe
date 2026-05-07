@@ -14,6 +14,18 @@ e1001 = [] # Seeed reTerminal E1001 (7", GDEY075T7 panel, 800x480 4-level graysc
 e1002 = [] # Seeed reTerminal E1002 (7", GDEP073E01 panel, 800x480)
 e1004 = [] # Seeed reTerminal E1004 (13", T133A01 panel, 1200x1600)
 
+# PPK2 bench-measurement mode (E1004 only). On boot, parks the SY6974B
+# charger in HIZ so the system rail runs entirely from the BAT input,
+# regardless of USB-C state. Intended for a Nordic Power Profiler Kit II
+# in source mode wired to the BAT pins (replacing the cell): PPK2
+# supplies a constant voltage and measures the real system current while
+# USB-C stays connected for `esptool` flash and the CH340K serial console
+# (CH340K is powered from VBUS via a separate LDO, independent of the
+# charger). Also disables the chip's I²C watchdog so HIZ doesn't
+# auto-clear after 40 s. The cell, if also connected, will not charge
+# while this build runs.
+disable_charger = []
+
 [dependencies]
 esp-hal = { version = "1.1.0", features = ["esp32s3", "unstable"] }
 

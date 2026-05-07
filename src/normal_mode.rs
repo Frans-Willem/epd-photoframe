@@ -172,7 +172,7 @@ impl From<String> for FetchError {
 /// the fallback timer) or a button press.
 pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let HardwareCtx {
-        mut rtc,
+        rtc,
         wake_action,
         wifi,
         mut gpio_btn_refresh,
@@ -244,11 +244,8 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     // serialise the two and waste that overlap.
     let fetch_result: Result<(Vec<u8>, Option<RefreshHint>), FetchError> = {
         let base_url_ref = current_url.as_str();
-        let wifi_result = single_shot_wifi::run(
-            wifi,
-            &creds,
-            WIFI_LINK_TIMEOUT,
-            |stack| async move {
+        let wifi_result =
+            single_shot_wifi::run(wifi, &creds, WIFI_LINK_TIMEOUT, |stack| async move {
                 let battery_mv = BATTERY_MV.wait().await;
                 let battery_pct = battery::mv_to_percentage(battery_mv);
                 let temp_humidity = TEMP_HUMIDITY.wait().await;
@@ -284,9 +281,8 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                 };
                 println!("Fetching {}", fetch_url);
                 try_fetch(stack, &fetch_url).await
-            },
-        )
-        .await;
+            })
+            .await;
         match wifi_result {
             Ok(inner) => inner,
             Err(e) => Err(FetchError::from(e.message(&creds.ssid))),
@@ -327,17 +323,21 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
                     // `/screen/foo`), so resolve against whatever we just
                     // fetched rather than the NVS base.
                     Some(raw) => match url_util::resolve(&current_url, raw) {
-                        Some(abs) => match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str())
-                        {
-                            Ok(stored) => {
-                                println!("Stashing redirect URL for next Timer wake: {}", abs);
-                                REDIRECT_URL.set(stored);
+                        Some(abs) => {
+                            match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str()) {
+                                Ok(stored) => {
+                                    println!("Stashing redirect URL for next Timer wake: {}", abs);
+                                    REDIRECT_URL.set(stored);
+                                }
+                                Err(heapless::CapacityError { .. }) => {
+                                    println!(
+                                        "Redirect URL too long ({} bytes); dropping",
+                                        abs.len()
+                                    );
+                                    REDIRECT_URL.clear();
+                                }
                             }
-                            Err(heapless::CapacityError { .. }) => {
-                                println!("Redirect URL too long ({} bytes); dropping", abs.len());
-                                REDIRECT_URL.clear();
-                            }
-                        },
+                        }
                         None => {
                             println!("Unresolvable redirect URL {:?}; dropping", raw);
                             REDIRECT_URL.clear();
@@ -465,7 +465,6 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
     let _ = epd;
 
     println!("Deep sleep!");
-
     let wakeup_pins: &mut [(
         &mut dyn esp_hal::gpio::RtcPin,
         esp_hal::rtc_cntl::sleep::WakeupLevel,
@@ -483,25 +482,7 @@ pub async fn run(ctx: HardwareCtx, creds: WifiCredentials) -> ! {
             esp_hal::rtc_cntl::sleep::WakeupLevel::Low,
         ),
     ];
-    let pin_wake_source = esp_hal::rtc_cntl::sleep::RtcioWakeupSource::new(wakeup_pins);
-
-    // Convert the absolute wake-up `Instant` back into a relative
-    // duration as late as possible, so any time still spent below
-    // (UART flush etc.) doesn't inflate it. `sleep_deep` takes a
-    // `core::time::Duration`, so we bridge through micros. Expect a
-    // residual drift on the order of a second over hours-scale sleeps:
-    // the RTC-slow clock is the internal 150 kHz RC oscillator, and
-    // even with esp-hal's calibration its accuracy is bounded.
-    let remaining = wakeup_requested.saturating_duration_since(embassy_time::Instant::now());
-    let sleep_duration = core::time::Duration::from_micros(remaining.as_micros());
-    println!("Deep sleep for {:?}", sleep_duration);
-    let timer_wake_source = esp_hal::rtc_cntl::sleep::TimerWakeupSource::new(sleep_duration);
-    let wake_sources: &[&dyn esp_hal::rtc_cntl::sleep::WakeSource] =
-        &[&timer_wake_source, &pin_wake_source];
-
-    println!("Going to deep sleep :)");
-    wait_for_tx_idle();
-    rtc.sleep_deep(wake_sources);
+    crate::sleep::start_sleep(rtc, Some(wakeup_requested), wakeup_pins);
 }
 
 /// Parse a `Refresh: <secs>[; url=<url>]` header value into a

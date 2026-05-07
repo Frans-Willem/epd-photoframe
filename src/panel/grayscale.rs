@@ -38,8 +38,8 @@ mod tests {
 
     #[test]
     fn anchor_grays_round_to_their_own_level() {
-        assert_eq!(level(  0,   0,   0), 0);
-        assert_eq!(level( 85,  85,  85), 1);
+        assert_eq!(level(0, 0, 0), 0);
+        assert_eq!(level(85, 85, 85), 1);
         assert_eq!(level(170, 170, 170), 2);
         assert_eq!(level(255, 255, 255), 3);
     }
@@ -49,8 +49,8 @@ mod tests {
         // Boundaries fall at the midpoints 42.5 / 127.5 / 212.5; integer
         // round-half-up via `+42` puts the integer just below each midpoint
         // in the lower bucket and the one just above into the upper.
-        assert_eq!(level( 42,  42,  42), 0);
-        assert_eq!(level( 43,  43,  43), 1);
+        assert_eq!(level(42, 42, 42), 0);
+        assert_eq!(level(43, 43, 43), 1);
         assert_eq!(level(127, 127, 127), 1);
         assert_eq!(level(128, 128, 128), 2);
         assert_eq!(level(212, 212, 212), 2);
@@ -60,10 +60,10 @@ mod tests {
     #[test]
     fn bt601_weighting() {
         // Pure red: luma = 0.299·255 ≈ 76 → bucket 1 (closer to 85 than 0).
-        assert_eq!(level(255,   0,   0), 1);
+        assert_eq!(level(255, 0, 0), 1);
         // Pure green: luma = 0.587·255 ≈ 150 → bucket 2 (closer to 170).
-        assert_eq!(level(  0, 255,   0), 2);
+        assert_eq!(level(0, 255, 0), 2);
         // Pure blue: luma = 0.114·255 ≈ 29 → bucket 0 (closer to 0).
-        assert_eq!(level(  0,   0, 255), 0);
+        assert_eq!(level(0, 0, 255), 0);
     }
 }
