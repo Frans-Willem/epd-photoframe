@@ -2,22 +2,167 @@
 //! concrete hardware context.
 
 use embassy_time::{Duration, Instant, Timer};
-use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pin, Pull};
+use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
 
 use crate::config::Config;
 use crate::config_mode;
-use crate::hardware::{HardwareCtx, WakeAction};
+use crate::hardware::{AppHardware, HardwareCtx, WakeAction};
 use crate::panel::{Panel, PanelColor};
 use crate::panic_mode;
 
-pub async fn run<P>(hw: HardwareCtx<P>, config: Config<'static>) -> !
+#[embassy_executor::task]
+async fn blink_task(mut led: Output<'static>) {
+    loop {
+        led.toggle();
+        Timer::after(Duration::from_millis(500)).await;
+    }
+}
+
+pub fn init() -> esp_hal::peripherals::Peripherals {
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    esp_hal::init(config)
+}
+
+pub async fn run<P>(hw: AppHardware<P>) -> !
 where
     P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>> + 'static,
     P::Color: PanelColor + 'static,
     P::Error: core::fmt::Debug,
     P::InitMode: core::fmt::Debug,
 {
+    let button_bits = (1u32 << hw.gpio_btn_refresh.number())
+        | (1u32 << hw.gpio_btn_previous.number())
+        | (1u32 << hw.gpio_btn_next.number());
+    let rtc_gpio_int_mask = read_and_clear_rtc_gpio_wake_status(button_bits);
+
+    let refresh_latched = (rtc_gpio_int_mask & (1u32 << hw.gpio_btn_refresh.number())) != 0;
+    let previous_latched = (rtc_gpio_int_mask & (1u32 << hw.gpio_btn_previous.number())) != 0;
+    let next_latched = (rtc_gpio_int_mask & (1u32 << hw.gpio_btn_next.number())) != 0;
+
+    let wake_action = determine_wake_action(
+        hw.reset_reason,
+        hw.wake_reason,
+        refresh_latched,
+        previous_latched,
+        next_latched,
+    );
+
+    let rtc = esp_hal::rtc_cntl::Rtc::new(hw.lpwr);
+    let time_since_boot = rtc.time_since_power_up();
+    println!(
+        "Device booting up - reset={:?} wake={:?} action={:?} \
+         latched[refresh={} previous={} next={}] \
+         uptime={time_since_boot:?}",
+        hw.reset_reason,
+        hw.wake_reason,
+        wake_action,
+        refresh_latched,
+        previous_latched,
+        next_latched,
+    );
+    println!(
+        "RTC CURRENT_URL: {:?}",
+        crate::normal_mode::CURRENT_URL.get().as_deref()
+    );
+    println!(
+        "RTC REDIRECT_URL: {:?}",
+        crate::normal_mode::REDIRECT_URL.get().as_deref()
+    );
+
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
+    esp_alloc::psram_allocator!(
+        hw.psram,
+        esp_hal::psram,
+        esp_hal::psram::PsramConfig {
+            mode: esp_hal::psram::PsramMode::OctalSpi,
+            ..Default::default()
+        }
+    );
+
+    let config = Config::new(hw.flash).expect("NVS init failed — check partition table and flash");
+    if config.is_configured().unwrap_or(false) {
+        let has_hint = config.get_wifi_hint().ok().flatten().is_some();
+        println!(
+            "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?} wifi.hint={}",
+            config
+                .get_wifi_ssid()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
+            config
+                .get_wifi_password()
+                .ok()
+                .flatten()
+                .map(|p| p.len())
+                .unwrap_or(0),
+            config
+                .get_image_url()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
+            if has_hint { "present" } else { "none" },
+        );
+    } else {
+        println!("NVS config incomplete; forcing config mode");
+    }
+
+    let timg0 = TimerGroup::new(hw.timg0);
+    let sw_ints = esp_hal::interrupt::software::SoftwareInterruptControl::new(hw.sw_interrupt);
+    esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
+
+    hw.spawner.spawn(
+        blink_task(Output::new(
+            hw.status_led,
+            Level::Low,
+            OutputConfig::default(),
+        ))
+        .unwrap(),
+    );
+
+    let i2c0 = esp_hal::i2c::master::I2c::new(hw.i2c0, esp_hal::i2c::master::Config::default())
+        .unwrap()
+        .with_sda(hw.gpio_i2c_sda)
+        .with_scl(hw.gpio_i2c_scl)
+        .into_async();
+
+    #[cfg(feature = "disable_charger")]
+    let i2c0 = if hw.has_sy6974b {
+        crate::sy6974b::enter_measurement_mode(i2c0).await
+    } else {
+        i2c0
+    };
+
+    hw.spawner.spawn(
+        crate::normal_mode::sensor_task(
+            Output::new(hw.gpio_battery_enable, Level::Low, OutputConfig::default()),
+            hw.adc1,
+            hw.gpio_battery_sense,
+            i2c0,
+            hw.has_sy6974b,
+        )
+        .unwrap(),
+    );
+
+    let hw = HardwareCtx {
+        spawner: hw.spawner,
+        rtc,
+        wake_action,
+        wifi: hw.wifi,
+        refresh_button_label: hw.refresh_button_label,
+        has_sy6974b: hw.has_sy6974b,
+        gpio_btn_refresh: hw.gpio_btn_refresh,
+        gpio_btn_previous: hw.gpio_btn_previous,
+        gpio_btn_next: hw.gpio_btn_next,
+        spi_bus: hw.spi_bus,
+        epd: hw.epd,
+        buzzer: hw.buzzer,
+    };
+
     if let Some(panic_msg) = panic_mode::take_pending_message() {
         panic_mode::run(hw, panic_msg.as_str()).await
     } else {
@@ -91,7 +236,7 @@ where
     }
 }
 
-pub fn determine_wake_action(
+fn determine_wake_action(
     reset_reason: Option<esp_hal::rtc_cntl::SocResetReason>,
     wake_reason: esp_hal::system::SleepSource,
     refresh_latched: bool,
@@ -138,7 +283,7 @@ pub fn determine_wake_action(
     }
 }
 
-pub fn read_and_clear_rtc_gpio_wake_status(mask: u32) -> u32 {
+fn read_and_clear_rtc_gpio_wake_status(mask: u32) -> u32 {
     let rtc_io = esp_hal::peripherals::RTC_IO::regs();
     let value = rtc_io.rtc_gpio_status().read().int().bits() & mask;
     unsafe {
