@@ -19,7 +19,6 @@ pub mod config;
 pub mod config_image;
 pub mod config_mode;
 pub mod error_image;
-pub mod hardware;
 pub mod iter_util;
 pub mod net_resources;
 pub mod normal_mode;
