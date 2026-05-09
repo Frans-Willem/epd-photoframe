@@ -176,9 +176,14 @@ where
     P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
 {
     let HardwareCtx {
+        spawner,
         rtc,
         wake_action,
         wifi,
+        battery_enable,
+        adc1,
+        battery_sense,
+        i2c0,
         mut gpio_btn_refresh,
         mut gpio_btn_previous,
         mut gpio_btn_next,
@@ -188,6 +193,15 @@ where
     } = ctx;
 
     let (panel_width, panel_height) = (P::WIDTH, P::HEIGHT);
+
+    println!("RTC CURRENT_URL: {:?}", CURRENT_URL.get().as_deref());
+    println!("RTC REDIRECT_URL: {:?}", REDIRECT_URL.get().as_deref());
+
+    // By the time the URL is being built below, both sensor signals
+    // should be populated — the 10 ms ADC settle + the 10 ms SHT40
+    // conversion happen alongside the ~1.3 s WiFi association, so the
+    // `wait()`s in the fetch closure are essentially free.
+    spawner.spawn(sensor_task(battery_enable, adc1, battery_sense, i2c0).unwrap());
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
@@ -437,7 +451,7 @@ where
             gpio_btn_next.reborrow(),
             InputConfig::default().with_pull(Pull::Up),
         );
-        use embassy_futures::select::{Either4, select4};
+        use embassy_futures::select::{select4, Either4};
         match select4(
             panel_update,
             wait_for_press(&mut refresh_in, BUTTON_DEBOUNCE),
