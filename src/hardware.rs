@@ -4,7 +4,7 @@
 //! see the same field set.
 
 use embassy_executor::Spawner;
-use esp_hal::gpio::AnyPin;
+use esp_hal::gpio::{AnyPin, Output};
 use esp_hal::spi::master::Spi;
 
 use crate::buzzer::Buzzer;
@@ -56,6 +56,13 @@ pub struct HardwareCtx<P> {
     pub rtc: esp_hal::rtc_cntl::Rtc<'static>,
     pub wake_action: WakeAction,
     pub wifi: esp_hal::peripherals::WIFI<'static>,
+
+    /// Sensor hardware used only by the normal refresh flow to populate
+    /// battery / temperature / humidity / charger status URL parameters.
+    pub battery_enable: Output<'static>,
+    pub adc1: esp_hal::peripherals::ADC1<'static>,
+    pub battery_sense: esp_hal::peripherals::GPIO1<'static>,
+    pub i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
 
     /// Button pins; held so the normal flow can hand them to
     /// `RtcioWakeupSource` as deep-sleep wake sources.

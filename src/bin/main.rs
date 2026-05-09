@@ -15,9 +15,9 @@ use esp_hal::gpio::{Input, InputConfig, Pin, Pull};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_println::println;
 
-use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::Config as SpiConfig;
 use esp_hal::spi::master::Spi;
+use esp_hal::spi::Mode as SpiMode;
 
 use esp_hal::system::SleepSource;
 
@@ -274,14 +274,6 @@ async fn main(spawner: Spawner) -> ! {
          latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
          uptime={time_since_boot:?}"
     );
-    println!(
-        "RTC CURRENT_URL: {:?}",
-        epd_photoframe::normal_mode::CURRENT_URL.get().as_deref()
-    );
-    println!(
-        "RTC REDIRECT_URL: {:?}",
-        epd_photoframe::normal_mode::REDIRECT_URL.get().as_deref()
-    );
 
     // Load runtime configuration from NVS. A fresh / blank partition is
     // not an error (esp-nvs treats all-0xFF as "no entries yet"), so the
@@ -321,20 +313,6 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap());
 
-    // By the time the URL is being built in `normal_mode::run`, both
-    // sensor signals have been populated — the 10 ms ADC settle + the
-    // 10 ms SHT40 conversion happen alongside the ~1.3 s WiFi association,
-    // so the `wait()`s are essentially free.
-    spawner.spawn(
-        epd_photoframe::normal_mode::sensor_task(
-            Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
-            peripherals.ADC1,
-            peripherals.GPIO1,
-            i2c0,
-        )
-        .unwrap(),
-    );
-
     // Unified hardware context handed off to whichever top-level flow
     // wins (`panic_mode::run`, `run_normal_boot`, then `normal_mode::run`
     // or `config_mode::run`). The panel's board-level enable rail
@@ -347,6 +325,10 @@ async fn main(spawner: Spawner) -> ! {
         rtc,
         wake_action,
         wifi: peripherals.WIFI,
+        battery_enable: Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
+        adc1: peripherals.ADC1,
+        battery_sense: peripherals.GPIO1,
+        i2c0,
         gpio_btn_refresh: gpio_btn_refresh.degrade(),
         gpio_btn_previous: gpio_btn_previous.degrade(),
         gpio_btn_next: gpio_btn_next.degrade(),
