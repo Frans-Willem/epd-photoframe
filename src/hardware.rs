@@ -1,61 +1,13 @@
 //! Shared hardware container handed between `main()` and whichever mode
 //! runs this boot (config vs. normal). Keeping it here means neither mode
 //! needs to cfg-gate on the panel model or care about pin counts — they
-//! see the same `EpdPanel` alias and the same field set.
+//! see the same field set.
 
 use embassy_executor::Spawner;
-use esp_hal::gpio::{AnyPin, Output};
+use esp_hal::gpio::AnyPin;
 use esp_hal::spi::master::Spi;
 
 use crate::buzzer::Buzzer;
-use crate::panel::Panel;
-
-#[cfg(feature = "e1002")]
-use crate::panel::gdep073e01::Gdep073e01;
-#[cfg(feature = "e1001")]
-use crate::panel::gdey075t7::Gdey075t7;
-#[cfg(feature = "e1004")]
-use crate::panel::t133a01::T133A01;
-
-/// Fully-specialised type of the built panel driver. All variants
-/// implement the [`crate::panel::Panel`] trait so the rest of the firmware
-/// can drive the panel without caring which model it is.
-#[cfg(feature = "e1001")]
-pub type EpdPanel = Gdey075t7<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>,
-    esp_hal::gpio::Input<'static>,
-    Output<'static>,
-    Output<'static>,
->;
-#[cfg(feature = "e1002")]
-pub type EpdPanel = Gdep073e01<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>,
-    esp_hal::gpio::Input<'static>,
-    Output<'static>,
-    Output<'static>,
->;
-#[cfg(feature = "e1004")]
-pub type EpdPanel = T133A01<
-    Spi<'static, esp_hal::Async>,
-    Output<'static>, // cs_master
-    Output<'static>, // cs_slave
-    esp_hal::gpio::Input<'static>,
-    Output<'static>, // dc
-    Output<'static>, // rst
-    Output<'static>, // en (TFT_EN rail)
->;
-
-/// The panel's pixel colour type. Aliased through the `Panel` trait
-/// projection so callers can write `EpdColor::WHITE` etc. without
-/// hard-coding `Spectra6Color` / `Gray2` per device.
-pub type EpdColor = <EpdPanel as Panel<Spi<'static, esp_hal::Async>>>::Color;
-
-/// The panel's per-init mode selector — see [`Panel::InitMode`]. Most
-/// devices use `()` (single mode); E1001's UC8179 driver exposes
-/// `Bw` / `FourLevel`.
-pub type EpdInitMode = <EpdPanel as Panel<Spi<'static, esp_hal::Async>>>::InitMode;
 
 /// What the user (or the wake timer) wants us to do this cycle. Consumed
 /// by the normal flow to pick an `action=` query-string fragment and to
@@ -96,9 +48,10 @@ impl WakeAction {
 }
 
 /// Everything both `config_mode::run` and `main_normal` need. The panel
-/// driver is pre-built (aliased as `EpdPanel` above) so neither mode needs
-/// cfg gates for pin counts or panel-model-specific types.
-pub struct HardwareCtx {
+/// driver is pre-built by `main`, and the modes stay generic over the
+/// concrete driver so they don't need cfg gates for pin counts or
+/// panel-model-specific types.
+pub struct HardwareCtx<P> {
     pub spawner: Spawner,
     pub rtc: esp_hal::rtc_cntl::Rtc<'static>,
     pub wake_action: WakeAction,
@@ -115,7 +68,7 @@ pub struct HardwareCtx {
     /// driver implements [`crate::panel::Panel`] including `enable` /
     /// `disable` for the board-level TFT rail on devices that have one.
     pub spi_bus: Spi<'static, esp_hal::Async>,
-    pub epd: EpdPanel,
+    pub epd: P,
 
     /// Buzzer driver pre-built around the GPIO45 piezo + LEDC peripheral.
     /// Always populated — both E1002 and E1004 have the piezo on the

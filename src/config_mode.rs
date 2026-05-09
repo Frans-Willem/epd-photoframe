@@ -18,13 +18,16 @@ use esp_println::println;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
+use crate::hardware::HardwareCtx;
 use crate::net_resources::NETWORK_RESOURCES;
 use crate::panel::{Panel, PanelColor};
 
 mod portal;
 
-pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
+pub async fn run<P>(ctx: HardwareCtx<P>, mut nvs: Config<'static>) -> !
+where
+    P: Panel<Spi<'static, esp_hal::Async>>,
+{
     let HardwareCtx {
         spawner,
         wifi,
@@ -103,69 +106,72 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     spawner.spawn(dns_hijack_task(net_stack).unwrap());
     spawner.spawn(portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap());
 
-    // Hand the panel rendering off to its own task — composing the QR
-    // + instructions bitmap and driving the ~20 s e-ink refresh all run
-    // in the background so a fast Save / Refresh press isn't blocked
-    // waiting for them. The software reset at the end of this function
-    // cleanly interrupts the driver mid-update if the user wins the
-    // race; the next boot's own panel reset recovers.
-    spawner.spawn(panel_render_task(spi_bus, epd, ap_ssid).unwrap());
+    // Run panel rendering alongside the save / Refresh race. If panel
+    // rendering finishes first, config mode keeps serving the portal; if
+    // the user exits first, software reset interrupts the render and the
+    // next boot's own panel reset recovers.
+    let panel_rendering = panel_render_task(spi_bus, epd, ap_ssid);
 
-    // Two exits from config mode:
-    //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
-    //     persist to NVS, reset.
-    //   - the user presses the Refresh button → don't touch NVS, reset
-    //     anyway (next boot lands in normal mode with the existing
-    //     creds).
-    // A failure to write NVS is logged but we reset regardless: either
-    // partial success lands new values for the next boot, or NVS is
-    // still incomplete and we re-enter config mode for a retry. Either
-    // beats silently hanging after the user hit "Save".
-    println!("Config mode ready — awaiting save or Refresh press.");
-    let mut refresh_input =
-        Input::new(gpio_btn_refresh, InputConfig::default().with_pull(Pull::Up));
-    let decision = embassy_futures::select::select(
-        portal::SAVE_SIGNAL.wait(),
-        wait_for_press(&mut refresh_input, Duration::from_millis(50)),
-    )
-    .await;
-    match decision {
-        embassy_futures::select::Either::First(creds) => {
-            println!(
-                "Saving config to NVS: ssid={:?}, url={:?}, password={}",
-                creds.ssid,
-                creds.url,
-                if creds.password.is_some() {
-                    "updated"
-                } else {
-                    "unchanged"
+    let wait_and_save = async {
+        // Two exits from config mode:
+        //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
+        //     persist to NVS, reset.
+        //   - the user presses the Refresh button → don't touch NVS, reset
+        //     anyway (next boot lands in normal mode with the existing
+        //     creds).
+        // A failure to write NVS is logged but we reset regardless: either
+        // partial success lands new values for the next boot, or NVS is
+        // still incomplete and we re-enter config mode for a retry. Either
+        // beats silently hanging after the user hit "Save".
+        println!("Config mode ready — awaiting save or Refresh press.");
+        let mut refresh_input =
+            Input::new(gpio_btn_refresh, InputConfig::default().with_pull(Pull::Up));
+        let decision = embassy_futures::select::select(
+            portal::SAVE_SIGNAL.wait(),
+            wait_for_press(&mut refresh_input, Duration::from_millis(50)),
+        )
+        .await;
+        match decision {
+            embassy_futures::select::Either::First(creds) => {
+                println!(
+                    "Saving config to NVS: ssid={:?}, url={:?}, password={}",
+                    creds.ssid,
+                    creds.url,
+                    if creds.password.is_some() {
+                        "updated"
+                    } else {
+                        "unchanged"
+                    }
+                );
+                if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
+                    println!("WARNING: failed to write wifi.ssid: {:?}", e);
                 }
-            );
-            if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
-                println!("WARNING: failed to write wifi.ssid: {:?}", e);
-            }
-            if let Some(pw) = creds.password.as_deref() {
-                if let Err(e) = nvs.set_wifi_password(pw) {
-                    println!("WARNING: failed to write wifi.pass: {:?}", e);
+                if let Some(pw) = creds.password.as_deref() {
+                    if let Err(e) = nvs.set_wifi_password(pw) {
+                        println!("WARNING: failed to write wifi.pass: {:?}", e);
+                    }
                 }
+                if let Err(e) = nvs.set_image_url(&creds.url) {
+                    println!("WARNING: failed to write image.url: {:?}", e);
+                }
+                // Any cached BSSID/channel belonging to a prior network is
+                // dropped automatically by the SSID/password setters above;
+                // no separate invalidation step needed.
+                //
+                // Give the HTTP response a moment to flush before we reboot.
+                Timer::after(Duration::from_millis(500)).await;
             }
-            if let Err(e) = nvs.set_image_url(&creds.url) {
-                println!("WARNING: failed to write image.url: {:?}", e);
+            embassy_futures::select::Either::Second(()) => {
+                println!("Refresh pressed — leaving config mode without saving.");
             }
-            // Any cached BSSID/channel belonging to a prior network is
-            // dropped automatically by the SSID/password setters above;
-            // no separate invalidation step needed.
-            //
-            // Give the HTTP response a moment to flush before we reboot.
-            Timer::after(Duration::from_millis(500)).await;
         }
-        embassy_futures::select::Either::Second(()) => {
-            println!("Refresh pressed — leaving config mode without saving.");
-        }
-    }
 
-    println!("Rebooting");
-    esp_hal::system::software_reset();
+        println!("Rebooting");
+        esp_hal::system::software_reset();
+    };
+    embassy_futures::join::join(panel_rendering, wait_and_save)
+        .await
+        .1
 }
 
 #[embassy_executor::task]
@@ -176,13 +182,14 @@ async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Inte
 /// Render the QR + instructions frame for configuration mode and drive
 /// the e-ink refresh, off the hot path so the save / Refresh race in
 /// `run` isn't blocked for ~20 s waiting for the panel to settle.
-#[embassy_executor::task]
-async fn panel_render_task(
+async fn panel_render_task<P>(
     mut spi_bus: Spi<'static, esp_hal::Async>,
-    mut epd: EpdPanel,
+    mut epd: P,
     ap_ssid: String,
-) {
-    let (panel_width, panel_height) = (EpdPanel::WIDTH, EpdPanel::HEIGHT);
+) where
+    P: Panel<Spi<'static, esp_hal::Async>>,
+{
+    let (panel_width, panel_height) = (P::WIDTH, P::HEIGHT);
     // The QR encodes a WiFi-join URI so most phones' camera-app scanners
     // offer a one-tap "Join network" action; the text below it gives the
     // SSID (for manual entry) and the portal URL as a fallback for users
@@ -201,7 +208,7 @@ async fn panel_render_task(
     );
     println!("Rendering config screen with QR: {}", qr_payload);
     let frame =
-        config_image::render::<EpdColor>(panel_width, panel_height, &qr_payload, &instructions);
+        config_image::render::<P::Color>(panel_width, panel_height, &qr_payload, &instructions);
 
     // Bring the panel's enable rail up before any panel I/O.
     // Idempotent — fine if the white pre-flash already raised it.
@@ -214,13 +221,13 @@ async fn panel_render_task(
     // The config-mode frame is rendered with `BLACK` + `WHITE` only
     // (QR plus instruction text); ask the panel which init mode covers
     // that. On E1001 that's `Bw`; single-mode panels return `()`.
-    let init_mode = EpdPanel::init_mode_for_palette([EpdColor::BLACK, EpdColor::WHITE]);
+    let init_mode = P::init_mode_for_palette([P::Color::BLACK, P::Color::WHITE]);
     epd.init(&mut spi_bus, init_mode).await.unwrap();
     println!("Power on");
     epd.power_on(&mut spi_bus).await.unwrap();
     println!("Update frame (QR)");
     let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+        let (x, y) = P::output_index_to_image_xy(idx);
         frame[y * panel_width + x]
     });
     epd.update_frame(&mut spi_bus, data).await.unwrap();

@@ -20,7 +20,7 @@ use crate::battery;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::error_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction};
+use crate::hardware::{HardwareCtx, WakeAction};
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::sht40;
@@ -171,7 +171,10 @@ impl From<String> for FetchError {
 /// white pre-flash that `main()`'s `run_normal_boot` may have kicked
 /// off, then deep-sleep waking on either the `Refresh:` interval (or
 /// the fallback timer) or a button press.
-pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
+pub async fn run<P>(ctx: HardwareCtx<P>, mut config: Config<'static>) -> !
+where
+    P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
+{
     let HardwareCtx {
         rtc,
         wake_action,
@@ -184,7 +187,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
         ..
     } = ctx;
 
-    let (panel_width, panel_height) = (EpdPanel::WIDTH, EpdPanel::HEIGHT);
+    let (panel_width, panel_height) = (P::WIDTH, P::HEIGHT);
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
@@ -297,7 +300,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
     // error path can still honour it. `try_decode_frame` returns
     // both the row-major frame and the actual PNG palette (sized to
     // `1 << bit_depth`) so the caller can pick a panel init mode.
-    let frame_result: Result<(Vec<EpdColor>, Vec<EpdColor>), String>;
+    let frame_result: Result<(Vec<P::Color>, Vec<P::Color>), String>;
     let hint: Option<RefreshHint>;
     match fetch_result {
         Ok((body, h)) => {
@@ -318,7 +321,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
     // absolute `Instant` so the time we then spend on the panel refresh
     // + UART flush is automatically subtracted from the sleep duration
     // when we compute it below.
-    let (frame, palette, wakeup_requested): (_, Vec<EpdColor>, embassy_time::Instant) =
+    let (frame, palette, wakeup_requested): (_, Vec<P::Color>, embassy_time::Instant) =
         match frame_result {
             Ok((frame, palette)) => {
                 match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
@@ -371,7 +374,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
                 // so its effective palette is exactly those two colours.
                 (
                     error_image::render(panel_width, panel_height, &msg, Some(retry_in)),
-                    Vec::from([EpdColor::BLACK, EpdColor::WHITE]),
+                    Vec::from([P::Color::BLACK, P::Color::WHITE]),
                     wakeup,
                 )
             }
@@ -393,8 +396,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
     // present in the PNG palette (≈ half the SPI traffic + faster
     // waveform when the server-side content is already 1bpp).
     // Single-mode panels return `()` immediately without iterating.
-    let init_mode = EpdPanel::init_mode_for_palette(palette.iter().copied());
-    println!("Init mode: {:?}", init_mode);
+    let init_mode = P::init_mode_for_palette(palette.iter().copied());
     let panel_update = async {
         // Bring the panel's enable rail up before any panel I/O.
         // Idempotent — fine if the white pre-flash already raised it.
@@ -409,7 +411,7 @@ pub async fn run(ctx: HardwareCtx, mut config: Config<'static>) -> ! {
         epd.power_on(&mut spi_bus).await.unwrap();
         println!("Update frame");
         let data = (0..(panel_width * panel_height)).map(|idx| {
-            let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+            let (x, y) = P::output_index_to_image_xy(idx);
             frame[y * panel_width + x]
         });
         epd.update_frame(&mut spi_bus, data).await.unwrap();
