@@ -17,7 +17,7 @@
 //!   guard-still-false it halts, on release builds with the guard set
 //!   it captures + soft-resets.
 //! - [`run`] — analogous to [`crate::config_mode::run`]: takes the
-//!   `HardwareCtx`, draws the captured message via
+//!   `AppContext`, draws the captured message via
 //!   [`crate::error_image::render`], and deep-sleeps until the timer
 //!   or a button wakes the device.
 
@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use esp_println::println;
 
 use crate::error_image;
-use crate::hardware::HardwareCtx;
+use crate::hardware::AppContext;
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::uart::wait_for_tx_idle;
@@ -183,7 +183,7 @@ fn force_led_on() {
 /// Render the captured panic `message` on the panel as an error frame
 /// and deep-sleep until a button is pressed (or the user power-cycles
 /// the device). Mirrors [`crate::config_mode::run`]'s shape: takes
-/// ownership of the [`HardwareCtx`] and never returns. Intended to be
+/// ownership of the [`AppContext`] and never returns. Intended to be
 /// called only when [`take_pending_message`] returned `Some` for the
 /// current boot; the slot has already been cleared by that take, so a
 /// re-panic during render falls back to a normal cycle on the next
@@ -196,11 +196,11 @@ fn force_led_on() {
 /// rendered frame also omits the "Will retry in …" line that
 /// transient-error frames carry, since there's nothing scheduled to
 /// retry.
-pub async fn run<P>(ctx: HardwareCtx<P>, message: &str) -> !
+pub async fn run<P>(ctx: AppContext<P>, message: &str) -> !
 where
     P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
 {
-    let HardwareCtx {
+    let AppContext {
         rtc,
         mut gpio_btn_refresh,
         mut gpio_btn_previous,

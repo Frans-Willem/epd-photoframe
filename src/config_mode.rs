@@ -18,17 +18,17 @@ use esp_println::println;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::HardwareCtx;
+use crate::hardware::AppContext;
 use crate::net_resources::NETWORK_RESOURCES;
 use crate::panel::{Panel, PanelColor};
 
 mod portal;
 
-pub async fn run<P>(ctx: HardwareCtx<P>, mut nvs: Config<'static>) -> !
+pub async fn run<P>(ctx: AppContext<P>, mut nvs: Config<'static>) -> !
 where
     P: Panel<Spi<'static, esp_hal::Async>>,
 {
-    let HardwareCtx {
+    let AppContext {
         spawner,
         wifi,
         gpio_btn_refresh,

@@ -4,7 +4,7 @@
 //! `Refresh:` interval / fallback timer or a button press.
 //!
 //! Mirrors [`crate::config_mode`] and [`crate::panic_mode`] in shape:
-//! a single [`run`] entry point that consumes the [`HardwareCtx`] and
+//! a single [`run`] entry point that consumes the [`AppContext`] and
 //! never returns.
 
 use alloc::format;
@@ -20,7 +20,7 @@ use crate::battery;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::error_image;
-use crate::hardware::{HardwareCtx, WakeAction};
+use crate::hardware::{AppContext, WakeAction};
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::sht40;
@@ -171,11 +171,11 @@ impl From<String> for FetchError {
 /// white pre-flash that `main()`'s `run_normal_boot` may have kicked
 /// off, then deep-sleep waking on either the `Refresh:` interval (or
 /// the fallback timer) or a button press.
-pub async fn run<P>(ctx: HardwareCtx<P>, mut config: Config<'static>) -> !
+pub async fn run<P>(ctx: AppContext<P>, mut config: Config<'static>) -> !
 where
     P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
 {
-    let HardwareCtx {
+    let AppContext {
         spawner,
         rtc,
         wake_action,

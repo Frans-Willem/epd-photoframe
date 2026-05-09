@@ -47,11 +47,11 @@ impl WakeAction {
     }
 }
 
-/// Everything both `config_mode::run` and `main_normal` need. The panel
-/// driver is pre-built by `main`, and the modes stay generic over the
-/// concrete driver so they don't need cfg gates for pin counts or
-/// panel-model-specific types.
-pub struct HardwareCtx<P> {
+/// Runtime context handed from the generic app dispatcher to whichever
+/// mode runs this boot. The panel driver is pre-built by `main`, and
+/// the modes stay generic over the concrete driver so they don't need
+/// cfg gates for pin counts or panel-model-specific types.
+pub struct AppContext<P> {
     pub spawner: Spawner,
     pub rtc: esp_hal::rtc_cntl::Rtc<'static>,
     pub wake_action: WakeAction,

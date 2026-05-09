@@ -25,7 +25,7 @@ extern crate alloc;
 
 use epd_photoframe::config::Config;
 use epd_photoframe::config_mode;
-use epd_photoframe::hardware::{HardwareCtx, WakeAction};
+use epd_photoframe::hardware::{AppContext, WakeAction};
 use epd_photoframe::panel::{Panel, PanelColor};
 use epd_photoframe::panic_mode;
 
@@ -392,7 +392,7 @@ where
     // each flow asserts it (idempotently) before its own first panel
     // I/O, so the rail is only powered when the panel is about to be
     // touched.
-    let hw = HardwareCtx {
+    let hw = AppContext {
         spawner,
         rtc,
         wake_action,
@@ -436,7 +436,7 @@ where
 /// clean two-arm `if let … else …` at the call site rather than
 /// "one arm calls a `-> !` function and the rest of the function
 /// implicitly only runs on the other arm".
-async fn run_normal_boot<P>(mut hw: HardwareCtx<P>, config: Config<'static>) -> !
+async fn run_normal_boot<P>(mut hw: AppContext<P>, config: Config<'static>) -> !
 where
     P: Panel<Spi<'static, esp_hal::Async>>,
 {
