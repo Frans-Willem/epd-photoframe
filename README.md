@@ -26,17 +26,15 @@ Stretch goals:
 
 Supported devices
 -----------------
-Build with `cargo build --features <device>` (exactly one device feature
-must be enabled — there is no default):
+Build the binary for the device you want to flash:
 
-| Feature | Device      | Panel     | Resolution  | State       |
+| Binary  | Device      | Panel     | Resolution  | State       |
 |---------|-------------|-----------|-------------|-------------|
 | `e1001` | reTerminal E1001 (7")  | GDEY075T7  | 800×480 (4-level grayscale) | working    |
 | `e1002` | reTerminal E1002 (7")  | GDEP073E01 | 800×480  | working     |
 | `e1004` | reTerminal E1004 (13") | T133A01   | 1200×1600 | working     |
 
-All three panel driver modules are always compiled regardless of the
-selected feature, so changes surface compile errors in every driver.
+For example: `cargo build --bin e1002`.
 
 Progress
 --------
