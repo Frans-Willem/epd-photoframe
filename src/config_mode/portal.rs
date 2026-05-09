@@ -28,16 +28,6 @@ use esp_println::println;
 /// *not* the sentinel is therefore a malformed submission.
 pub const PASSWORD_SENTINEL: &str = "___________________________unchanged___________________________unchanged___________________________";
 
-/// Device-specific label for the Refresh button — on the E1001 / E1002
-/// it's the unmarked green button, so we spell that out in the
-/// instructions; on the E1004 the button is clearly iconed and needs
-/// no qualifier. Used both in the portal HTML and in the panel
-/// instructions rendered by `config_mode`.
-#[cfg(any(feature = "e1001", feature = "e1002"))]
-pub const REFRESH_BUTTON_LABEL: &str = "Refresh button (green)";
-#[cfg(feature = "e1004")]
-pub const REFRESH_BUTTON_LABEL: &str = "Refresh button";
-
 const FORM_TEMPLATE: &str = include_str!("form.html");
 const SAVED_HTML: &[u8] = include_bytes!("saved.html");
 
@@ -98,7 +88,13 @@ pub static SAVE_SIGNAL: Signal<CriticalSectionRawMutex, PortalCreds> = Signal::n
 /// The password field is echoed back verbatim (modulo escaping) — the
 /// user and the browser already saw it when it was typed, so echoing
 /// it on a re-render leaks nothing and spares them a retype.
-fn render_form(ssid: &str, password: &str, url: &str, error: Option<&str>) -> String {
+fn render_form(
+    ssid: &str,
+    password: &str,
+    url: &str,
+    error: Option<&str>,
+    refresh_button_label: &str,
+) -> String {
     let error_html = match error {
         Some(msg) => alloc::format!(r#"<p class="error">{}</p>"#, html_attr_escape(msg)),
         None => String::new(),
@@ -108,7 +104,7 @@ fn render_form(ssid: &str, password: &str, url: &str, error: Option<&str>) -> St
         .replace("{ssid}", &html_attr_escape(ssid))
         .replace("{password}", &html_attr_escape(password))
         .replace("{url}", &html_attr_escape(url))
-        .replace("{refresh_hint}", REFRESH_BUTTON_LABEL)
+        .replace("{refresh_hint}", refresh_button_label)
 }
 
 /// Minimal HTML escape for values going into a double-quoted attribute.
@@ -136,6 +132,7 @@ pub struct PortalHandler {
     default_ssid: String,
     default_url: String,
     default_password_is_set: bool,
+    refresh_button_label: &'static str,
 }
 
 impl Handler for PortalHandler {
@@ -162,7 +159,7 @@ impl Handler for PortalHandler {
         if method == Method::Post {
             let path_is_save = conn.headers()?.path == "/save";
             if path_is_save {
-                return handle_save(conn, content_len).await;
+                return handle_save(conn, content_len, self.refresh_button_label).await;
             }
         }
         // Everything else (including all captive-portal probes) returns
@@ -180,6 +177,7 @@ impl Handler for PortalHandler {
             default_password,
             &self.default_url,
             None,
+            self.refresh_button_label,
         );
         write_form(conn, &html, 200, "OK").await
     }
@@ -188,6 +186,7 @@ impl Handler for PortalHandler {
 async fn handle_save<T, const N: usize>(
     conn: &mut Connection<'_, T, N>,
     content_len: usize,
+    refresh_button_label: &'static str,
 ) -> Result<(), Error<T::Error>>
 where
     T: Read + Write + edge_nal::TcpSplit,
@@ -210,7 +209,13 @@ where
         Some(r) => r,
         None => {
             println!("portal: form body did not parse");
-            let html = render_form("", "", "", Some(FormError::Unparseable.message()));
+            let html = render_form(
+                "",
+                "",
+                "",
+                Some(FormError::Unparseable.message()),
+                refresh_button_label,
+            );
             return write_form(conn, &html, 400, "Bad Request").await;
         }
     };
@@ -241,7 +246,13 @@ where
         }
         Err(err) => {
             println!("portal: validation failed: {}", err.message());
-            let html = render_form(&raw.ssid, &raw.password, &raw.url, Some(err.message()));
+            let html = render_form(
+                &raw.ssid,
+                &raw.password,
+                &raw.url,
+                Some(err.message()),
+                refresh_button_label,
+            );
             write_form(conn, &html, 400, "Bad Request").await
         }
     }
@@ -361,7 +372,13 @@ fn url_decode(s: &str) -> String {
 /// concurrent handler tasks cover phones that pipeline captive-portal
 /// probes without burning too much RAM on buffers.
 #[embassy_executor::task]
-pub async fn web_task(stack: Stack<'static>, ssid: String, url: String, password_is_set: bool) {
+pub async fn web_task(
+    stack: Stack<'static>,
+    ssid: String,
+    url: String,
+    password_is_set: bool,
+    refresh_button_label: &'static str,
+) {
     use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use edge_nal::TcpBind;
@@ -379,6 +396,7 @@ pub async fn web_task(stack: Stack<'static>, ssid: String, url: String, password
         default_ssid: ssid,
         default_url: url,
         default_password_is_set: password_is_set,
+        refresh_button_label,
     };
     println!("HTTP portal listening on :80");
     loop {

@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use esp_println::println;
 
 use crate::error_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
+use crate::hardware::HardwareCtx;
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::uart::wait_for_tx_idle;
@@ -146,38 +146,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     esp_hal::system::software_reset();
 }
 
-/// Drive the status LED high directly via the GPIO PAC. Wraps the
-/// PAC-mandated `unsafe` (svd2rust marks the W1TS field setters as
-/// `Unsafe` because it can't statically verify field semantics) in a
-/// safe helper — writing 1-bits to a write-1-to-set register only
-/// flips hardware status bits and can't violate memory safety.
-///
-/// Used from the panic handler's halt branch where the embassy
-/// executor isn't running, so we can't go through the normal
-/// `Output::set_high` path. If a panic fires before the LED pin has
-/// been configured as an output (very early boot), the OE write below
-/// is what actually enables it; the IO_MUX MCU function defaults to
-/// "GPIO" on these pins, so we don't need to touch IO_MUX.
+/// Placeholder for the panic handler's halt branch. The selected binary owns
+/// the status LED pin, so the shared panic path no longer pokes a device
+/// specific GPIO register directly.
 fn force_led_on() {
-    let gpio = esp_hal::peripherals::GPIO::regs();
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    {
-        // Status LED on GPIO6 — bit 6 of the lower bank.
-        const BIT: u32 = 1 << 6;
-        unsafe {
-            gpio.enable_w1ts().write(|w| w.bits(BIT));
-            gpio.out_w1ts().write(|w| w.bits(BIT));
-        }
-    }
-    #[cfg(feature = "e1004")]
-    {
-        // Status LED on GPIO48 — bit 16 of the upper bank (48 - 32).
-        const BIT: u32 = 1 << (48 - 32);
-        unsafe {
-            gpio.enable1_w1ts().write(|w| w.bits(BIT));
-            gpio.out1_w1ts().write(|w| w.bits(BIT));
-        }
-    }
+    // The device-specific LED pin now lives in the selected binary. Keep the
+    // panic path allocation/executor-free and skip forcing a board LED here.
 }
 
 /// Render the captured panic `message` on the panel as an error frame
@@ -196,7 +170,13 @@ fn force_led_on() {
 /// rendered frame also omits the "Will retry in …" line that
 /// transient-error frames carry, since there's nothing scheduled to
 /// retry.
-pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
+pub async fn run<P>(ctx: HardwareCtx<P>, message: &str) -> !
+where
+    P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
+    P::Color: PanelColor,
+    P::Error: core::fmt::Debug,
+    P::InitMode: core::fmt::Debug,
+{
     let HardwareCtx {
         rtc,
         mut gpio_btn_refresh,
@@ -210,10 +190,10 @@ pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
     println!("PANIC_MSG present; rendering panic frame");
     println!("Panic: {}", message);
 
-    let panel_width = EpdPanel::WIDTH;
-    let panel_height = EpdPanel::HEIGHT;
-    let frame: Vec<EpdColor> = error_image::render(panel_width, panel_height, message, None);
-    let init_mode = EpdPanel::init_mode_for_palette([EpdColor::BLACK, EpdColor::WHITE]);
+    let panel_width = P::WIDTH;
+    let panel_height = P::HEIGHT;
+    let frame: Vec<P::Color> = error_image::render(panel_width, panel_height, message, None);
+    let init_mode = P::init_mode_for_palette([P::Color::BLACK, P::Color::WHITE]);
 
     // Bring the panel's enable rail up before any panel I/O.
     epd.enable().await.unwrap();
@@ -229,7 +209,7 @@ pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
     epd.update_frame(
         &mut spi_bus,
         (0..(panel_width * panel_height)).map(|idx| {
-            let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+            let (x, y) = P::output_index_to_image_xy(idx);
             frame[y * panel_width + x]
         }),
     )

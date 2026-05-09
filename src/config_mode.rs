@@ -6,8 +6,11 @@
 //! instructions on the panel. On form submission, persist the values
 //! to NVS and trigger a software reset back into the normal flow.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
+use core::future::Future;
+use core::pin::Pin;
 
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
@@ -18,13 +21,19 @@ use esp_println::println;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
+use crate::hardware::HardwareCtx;
 use crate::net_resources::NETWORK_RESOURCES;
 use crate::panel::{Panel, PanelColor};
 
 mod portal;
 
-pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
+pub async fn run<P>(ctx: HardwareCtx<P>, mut nvs: Config<'static>) -> !
+where
+    P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>> + 'static,
+    P::Color: PanelColor + 'static,
+    P::Error: core::fmt::Debug,
+    P::InitMode: core::fmt::Debug,
+{
     let HardwareCtx {
         spawner,
         wifi,
@@ -32,6 +41,7 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
         spi_bus,
         epd,
         mut buzzer,
+        refresh_button_label,
         ..
     } = ctx;
 
@@ -101,7 +111,16 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     spawner.spawn(net_task(net_runner).unwrap());
     spawner.spawn(dhcp_server_task(net_stack).unwrap());
     spawner.spawn(dns_hijack_task(net_stack).unwrap());
-    spawner.spawn(portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap());
+    spawner.spawn(
+        portal::web_task(
+            net_stack,
+            stored_ssid,
+            stored_url,
+            password_is_set,
+            refresh_button_label,
+        )
+        .unwrap(),
+    );
 
     // Hand the panel rendering off to its own task — composing the QR
     // + instructions bitmap and driving the ~20 s e-ink refresh all run
@@ -109,7 +128,15 @@ pub async fn run(ctx: HardwareCtx, mut nvs: Config<'static>) -> ! {
     // waiting for them. The software reset at the end of this function
     // cleanly interrupts the driver mid-update if the user wins the
     // race; the next boot's own panel reset recovers.
-    spawner.spawn(panel_render_task(spi_bus, epd, ap_ssid).unwrap());
+    spawner.spawn(
+        panel_render_task(Box::pin(panel_render(
+            spi_bus,
+            epd,
+            ap_ssid,
+            refresh_button_label,
+        )))
+        .unwrap(),
+    );
 
     // Two exits from config mode:
     //   - the HTTP portal fires `SAVE_SIGNAL` with the submitted form →
@@ -176,13 +203,25 @@ async fn net_task(mut runner: embassy_net::Runner<'static, esp_radio::wifi::Inte
 /// Render the QR + instructions frame for configuration mode and drive
 /// the e-ink refresh, off the hot path so the save / Refresh race in
 /// `run` isn't blocked for ~20 s waiting for the panel to settle.
+type PanelRenderFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
+
 #[embassy_executor::task]
-async fn panel_render_task(
+async fn panel_render_task(panel_render: PanelRenderFuture) {
+    panel_render.await;
+}
+
+async fn panel_render<P>(
     mut spi_bus: Spi<'static, esp_hal::Async>,
-    mut epd: EpdPanel,
+    mut epd: P,
     ap_ssid: String,
-) {
-    let (panel_width, panel_height) = (EpdPanel::WIDTH, EpdPanel::HEIGHT);
+    refresh_button_label: &'static str,
+) where
+    P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>> + 'static,
+    P::Color: PanelColor + 'static,
+    P::Error: core::fmt::Debug,
+    P::InitMode: core::fmt::Debug,
+{
+    let (panel_width, panel_height) = (P::WIDTH, P::HEIGHT);
     // The QR encodes a WiFi-join URI so most phones' camera-app scanners
     // offer a one-tap "Join network" action; the text below it gives the
     // SSID (for manual entry) and the portal URL as a fallback for users
@@ -196,12 +235,11 @@ async fn panel_render_task(
          Then open: http://192.168.4.1/\n\
          \n\
          Press the {} to exit without saving.",
-        ap_ssid,
-        portal::REFRESH_BUTTON_LABEL
+        ap_ssid, refresh_button_label
     );
     println!("Rendering config screen with QR: {}", qr_payload);
     let frame =
-        config_image::render::<EpdColor>(panel_width, panel_height, &qr_payload, &instructions);
+        config_image::render::<P::Color>(panel_width, panel_height, &qr_payload, &instructions);
 
     // Bring the panel's enable rail up before any panel I/O.
     // Idempotent — fine if the white pre-flash already raised it.
@@ -214,13 +252,13 @@ async fn panel_render_task(
     // The config-mode frame is rendered with `BLACK` + `WHITE` only
     // (QR plus instruction text); ask the panel which init mode covers
     // that. On E1001 that's `Bw`; single-mode panels return `()`.
-    let init_mode = EpdPanel::init_mode_for_palette([EpdColor::BLACK, EpdColor::WHITE]);
+    let init_mode = P::init_mode_for_palette([P::Color::BLACK, P::Color::WHITE]);
     epd.init(&mut spi_bus, init_mode).await.unwrap();
     println!("Power on");
     epd.power_on(&mut spi_bus).await.unwrap();
     println!("Update frame (QR)");
     let data = (0..(panel_width * panel_height)).map(|idx| {
-        let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+        let (x, y) = P::output_index_to_image_xy(idx);
         frame[y * panel_width + x]
     });
     epd.update_frame(&mut spi_bus, data).await.unwrap();
