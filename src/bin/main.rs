@@ -131,76 +131,6 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    // Bind semantic button names to the device-specific GPIOs. This is the
-    // only place where the silkscreen-to-GPIO mapping appears; everything
-    // downstream uses the `gpio_btn_*` handles (and their `.number()`) so
-    // the rest of main() is device-agnostic. E1001 inherits the E1002
-    // mapping (same hardware aside from the panel).
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
-        (peripherals.GPIO3, peripherals.GPIO5, peripherals.GPIO4);
-    #[cfg(feature = "e1004")]
-    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
-        (peripherals.GPIO5, peripherals.GPIO4, peripherals.GPIO3);
-
-    // Read all three buttons ASAP so we capture the press even if the user
-    // releases quickly after powering the device out of deep sleep.
-    let refresh_held = Input::new(
-        gpio_btn_refresh.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
-    let previous_held = Input::new(
-        gpio_btn_previous.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
-    let next_held = Input::new(
-        gpio_btn_next.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
-
-    // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
-    // and clear it immediately so stale bits don't carry into the next cycle.
-    // The latch is authoritative because it captures the pin state at the
-    // exact moment of wake — even a sub-millisecond tap is recorded, whereas
-    // the current-level read above misses anything released during the
-    // ~300 ms bootloader window.
-    let button_bits = (1u32 << gpio_btn_refresh.number())
-        | (1u32 << gpio_btn_previous.number())
-        | (1u32 << gpio_btn_next.number());
-    let rtc_gpio_int_mask = read_and_clear_rtc_gpio_wake_status(button_bits);
-
-    let refresh_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_refresh.number())) != 0;
-    let previous_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_previous.number())) != 0;
-    let next_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_next.number())) != 0;
-
-    let wake_action = determine_wake_action(
-        reset_reason,
-        wake_reason,
-        refresh_latched,
-        previous_latched,
-        next_latched,
-    );
-
-    let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
-    let time_since_boot = rtc.time_since_power_up();
-    println!(
-        "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
-         latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
-         held[refresh={refresh_held} previous={previous_held} next={next_held}] \
-         uptime={time_since_boot:?}"
-    );
-    println!(
-        "RTC CURRENT_URL: {:?}",
-        epd_photoframe::normal_mode::CURRENT_URL.get().as_deref()
-    );
-    println!(
-        "RTC REDIRECT_URL: {:?}",
-        epd_photoframe::normal_mode::REDIRECT_URL.get().as_deref()
-    );
-
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(
         peripherals.PSRAM,
@@ -211,83 +141,28 @@ async fn main(spawner: Spawner) -> ! {
         }
     );
 
-    // Load runtime configuration from NVS. A fresh / blank partition is
-    // not an error (esp-nvs treats all-0xFF as "no entries yet"), so the
-    // only ways `Config::new` fails are programming bugs (wrong partition
-    // offset/size) or actual flash hardware trouble — panicking there is
-    // the right call. A missing *key* is different: that's how we detect
-    // "needs configuring" and short-circuit into config mode below.
-    let config =
-        Config::new(peripherals.FLASH).expect("NVS init failed — check partition table and flash");
-    if config.is_configured().unwrap_or(false) {
-        let has_hint = config.get_wifi_hint().ok().flatten().is_some();
-        println!(
-            "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?} wifi.hint={}",
-            config
-                .get_wifi_ssid()
-                .ok()
-                .flatten()
-                .as_deref()
-                .unwrap_or(""),
-            config
-                .get_wifi_password()
-                .ok()
-                .flatten()
-                .map(|p| p.len())
-                .unwrap_or(0),
-            config
-                .get_image_url()
-                .ok()
-                .flatten()
-                .as_deref()
-                .unwrap_or(""),
-            if has_hint { "present" } else { "none" },
-        );
-    } else {
-        println!("NVS config incomplete; forcing config mode");
-    }
-
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_ints =
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
 
-    // Status LED is on a different GPIO per device.
+    // Bind semantic board pins to device-specific GPIOs. This is the
+    // only place where the silkscreen-to-GPIO and status LED mappings
+    // appear; everything downstream uses the semantic local names.
+    // E1001 inherits the E1002 mapping (same hardware aside from the panel).
     #[cfg(any(feature = "e1001", feature = "e1002"))]
-    let led_pin = peripherals.GPIO6;
+    let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next, led_pin) = (
+        peripherals.GPIO3,
+        peripherals.GPIO5,
+        peripherals.GPIO4,
+        peripherals.GPIO6,
+    );
     #[cfg(feature = "e1004")]
-    let led_pin = peripherals.GPIO48;
-    spawner.spawn(blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap());
-
-    // One task that drives both per-wake sensor reads (battery ADC +
-    // SHT40 over I²C0) concurrently via `join`. By the time the URL
-    // is being built in `normal_mode::run`, both signals have been
-    // populated — the 10 ms ADC settle + the 10 ms SHT40 conversion
-    // happen alongside the ~1.3 s WiFi association, so the `wait()`s
-    // are essentially free.
-    let i2c0 =
-        esp_hal::i2c::master::I2c::new(peripherals.I2C0, esp_hal::i2c::master::Config::default())
-            .unwrap()
-            .with_sda(peripherals.GPIO19)
-            .with_scl(peripherals.GPIO20)
-            .into_async();
-
-    // PPK2 measurement mode: park the SY6974B charger in HIZ before
-    // anything else runs so the system rail spends as little time as
-    // possible drawing through VBUS. This must happen after I²C0 is up
-    // (the chip lives on this bus) but before any code that depends on
-    // the BAT-only power path being established.
-    #[cfg(all(feature = "e1004", feature = "disable_charger"))]
-    let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
-
-    spawner.spawn(
-        epd_photoframe::normal_mode::sensor_task(
-            Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
-            peripherals.ADC1,
-            peripherals.GPIO1,
-            i2c0,
-        )
-        .unwrap(),
+    let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next, led_pin) = (
+        peripherals.GPIO5,
+        peripherals.GPIO4,
+        peripherals.GPIO3,
+        peripherals.GPIO48,
     );
 
     // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
@@ -350,6 +225,114 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO38, Level::Low, OutputConfig::default()),
         // GPIO12: TFT_EN board rail (E1004 only); high while the panel is powered.
         Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
+    );
+
+    // One task later drives both per-wake sensor reads (battery ADC +
+    // SHT40 over I²C0) concurrently via `join`. I²C0 is built early so
+    // the optional charger measurement-mode setup can also happen before
+    // the generic boot flow below.
+    let i2c0 =
+        esp_hal::i2c::master::I2c::new(peripherals.I2C0, esp_hal::i2c::master::Config::default())
+            .unwrap()
+            .with_sda(peripherals.GPIO19)
+            .with_scl(peripherals.GPIO20)
+            .into_async();
+
+    // PPK2 measurement mode: park the SY6974B charger in HIZ before
+    // anything else runs so the system rail spends as little time as
+    // possible drawing through VBUS. This must happen after I²C0 is up
+    // (the chip lives on this bus).
+    #[cfg(all(feature = "e1004", feature = "disable_charger"))]
+    let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
+
+    // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
+    // and clear it immediately so stale bits don't carry into the next cycle.
+    // The latch is authoritative because it captures the pin state at the
+    // exact moment of wake, even if the user releases the button during
+    // the ~300 ms bootloader window.
+    let button_bits = (1u32 << gpio_btn_refresh.number())
+        | (1u32 << gpio_btn_previous.number())
+        | (1u32 << gpio_btn_next.number());
+    let rtc_gpio_int_mask = read_and_clear_rtc_gpio_wake_status(button_bits);
+
+    let refresh_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_refresh.number())) != 0;
+    let previous_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_previous.number())) != 0;
+    let next_latched = (rtc_gpio_int_mask & (1u32 << gpio_btn_next.number())) != 0;
+
+    let wake_action = determine_wake_action(
+        reset_reason,
+        wake_reason,
+        refresh_latched,
+        previous_latched,
+        next_latched,
+    );
+
+    let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
+    let time_since_boot = rtc.time_since_power_up();
+    println!(
+        "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
+         latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
+         uptime={time_since_boot:?}"
+    );
+    println!(
+        "RTC CURRENT_URL: {:?}",
+        epd_photoframe::normal_mode::CURRENT_URL.get().as_deref()
+    );
+    println!(
+        "RTC REDIRECT_URL: {:?}",
+        epd_photoframe::normal_mode::REDIRECT_URL.get().as_deref()
+    );
+
+    // Load runtime configuration from NVS. A fresh / blank partition is
+    // not an error (esp-nvs treats all-0xFF as "no entries yet"), so the
+    // only ways `Config::new` fails are programming bugs (wrong partition
+    // offset/size) or actual flash hardware trouble — panicking there is
+    // the right call. A missing *key* is different: that's how we detect
+    // "needs configuring" and short-circuit into config mode below.
+    let config =
+        Config::new(peripherals.FLASH).expect("NVS init failed — check partition table and flash");
+    if config.is_configured().unwrap_or(false) {
+        let has_hint = config.get_wifi_hint().ok().flatten().is_some();
+        println!(
+            "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?} wifi.hint={}",
+            config
+                .get_wifi_ssid()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
+            config
+                .get_wifi_password()
+                .ok()
+                .flatten()
+                .map(|p| p.len())
+                .unwrap_or(0),
+            config
+                .get_image_url()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
+            if has_hint { "present" } else { "none" },
+        );
+    } else {
+        println!("NVS config incomplete; forcing config mode");
+    }
+
+    spawner.spawn(blink_task(Output::new(led_pin, Level::Low, OutputConfig::default())).unwrap());
+
+    // By the time the URL is being built in `normal_mode::run`, both
+    // sensor signals have been populated — the 10 ms ADC settle + the
+    // 10 ms SHT40 conversion happen alongside the ~1.3 s WiFi association,
+    // so the `wait()`s are essentially free.
+    spawner.spawn(
+        epd_photoframe::normal_mode::sensor_task(
+            Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
+            peripherals.ADC1,
+            peripherals.GPIO1,
+            i2c0,
+        )
+        .unwrap(),
     );
 
     // Unified hardware context handed off to whichever top-level flow
