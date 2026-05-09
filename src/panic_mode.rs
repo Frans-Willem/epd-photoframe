@@ -23,7 +23,7 @@
 
 use alloc::vec::Vec;
 use core::fmt::Write;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use esp_println::println;
 
@@ -54,12 +54,21 @@ static PANIC_MSG: RtcPersisted<heapless::String<PANIC_MSG_MAX>> = RtcPersisted::
 /// — the first re-panic halts, the user still sees the previous panic
 /// message on the panel, and JTAG can attach to investigate.
 static REBOOT_ALLOWED: AtomicBool = AtomicBool::new(false);
+const PANIC_LED_UNSET: u8 = u8::MAX;
+static PANIC_LED_GPIO: AtomicU8 = AtomicU8::new(PANIC_LED_UNSET);
 
 /// Allow the panic handler to soft-reset on the next panic. Called by
 /// `main()` once it has confirmed the current cycle is not rendering a
 /// previous panic.
 pub fn allow_reboot() {
     REBOOT_ALLOWED.store(true, Ordering::Relaxed);
+}
+
+/// Set the GPIO number that the panic handler should force high when
+/// halting. Stores only the pin number because the panic handler cannot
+/// rely on owning HAL GPIO objects or on the executor still running.
+pub fn set_panic_led(gpio: u8) {
+    PANIC_LED_GPIO.store(gpio, Ordering::Relaxed);
 }
 
 /// Return any captured panic message from a previous boot, clearing
@@ -159,23 +168,24 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// is what actually enables it; the IO_MUX MCU function defaults to
 /// "GPIO" on these pins, so we don't need to touch IO_MUX.
 fn force_led_on() {
-    let gpio = esp_hal::peripherals::GPIO::regs();
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    {
-        // Status LED on GPIO6 — bit 6 of the lower bank.
-        const BIT: u32 = 1 << 6;
-        unsafe {
-            gpio.enable_w1ts().write(|w| w.bits(BIT));
-            gpio.out_w1ts().write(|w| w.bits(BIT));
-        }
+    let gpio_number = PANIC_LED_GPIO.load(Ordering::Relaxed);
+    if gpio_number == PANIC_LED_UNSET {
+        return;
     }
-    #[cfg(feature = "e1004")]
-    {
-        // Status LED on GPIO48 — bit 16 of the upper bank (48 - 32).
-        const BIT: u32 = 1 << (48 - 32);
+
+    let gpio = esp_hal::peripherals::GPIO::regs();
+
+    if gpio_number < 32 {
+        let bit = 1u32 << gpio_number;
         unsafe {
-            gpio.enable1_w1ts().write(|w| w.bits(BIT));
-            gpio.out1_w1ts().write(|w| w.bits(BIT));
+            gpio.enable_w1ts().write(|w| w.bits(bit));
+            gpio.out_w1ts().write(|w| w.bits(bit));
+        }
+    } else if gpio_number < 64 {
+        let bit = 1u32 << (gpio_number - 32);
+        unsafe {
+            gpio.enable1_w1ts().write(|w| w.bits(bit));
+            gpio.out1_w1ts().write(|w| w.bits(bit));
         }
     }
 }

@@ -92,20 +92,23 @@ struct FrameWithPalette<C> {
 /// [`TEMP_HUMIDITY`] / [`POWER_STATUS`] slots. Battery (ADC + GPIO21)
 /// is independent of I²C0, so it runs in parallel with the I²C-bound
 /// chain. Inside the chain, reads share the bus sequentially: SHT40
-/// first, then (E1004 only) the SY6974B charger.
+/// first, then the SY6974B charger on boards where that chip is
+/// accessible to this firmware.
 #[embassy_executor::task]
 pub async fn sensor_task(
     battery_enable: Output<'static>,
     adc1: esp_hal::peripherals::ADC1<'static>,
     battery_sense: esp_hal::peripherals::GPIO1<'static>,
     mut i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
+    has_sy6974b: bool,
 ) {
     let i2c_reads = async {
         let temp_humidity = sht40::read_temp_humidity(&mut i2c0).await;
-        #[cfg(feature = "e1004")]
-        let power_status = sy6974b::read_power_status(&mut i2c0).await;
-        #[cfg(not(feature = "e1004"))]
-        let power_status: Option<sy6974b::PowerStatus> = None;
+        let power_status = if has_sy6974b {
+            sy6974b::read_power_status(&mut i2c0).await
+        } else {
+            None
+        };
         (temp_humidity, power_status)
     };
     let (battery_mv, (temp_humidity, power_status)) = embassy_futures::join::join(
@@ -185,6 +188,7 @@ where
         rtc,
         wake_action,
         wifi,
+        has_sy6974b,
         battery_enable,
         adc1,
         battery_sense,
@@ -206,7 +210,7 @@ where
     // should be populated — the 10 ms ADC settle + the 10 ms SHT40
     // conversion happen alongside the ~1.3 s WiFi association, so the
     // `wait()`s in the fetch closure are essentially free.
-    spawner.spawn(sensor_task(battery_enable, adc1, battery_sense, i2c0).unwrap());
+    spawner.spawn(sensor_task(battery_enable, adc1, battery_sense, i2c0, has_sy6974b).unwrap());
 
     // Figure out what to fetch this cycle. Start from whatever's in
     // RTC (defaulting to the NVS URL on cold boot) and adjust per the
