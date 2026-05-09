@@ -14,7 +14,7 @@ use esp_hal::spi::master::Spi;
 
 extern crate alloc;
 
-use epd_photoframe::hardware::AppHardware;
+use epd_photoframe::app::App;
 use epd_photoframe::panel::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -59,7 +59,7 @@ async fn main(spawner: Spawner) -> ! {
         Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
     );
 
-    epd_photoframe::app::run(AppHardware {
+    App {
         spawner,
         reset_reason,
         wake_reason,
@@ -84,6 +84,7 @@ async fn main(spawner: Spawner) -> ! {
         spi_bus: epd_spi_bus,
         epd,
         buzzer: epd_photoframe::buzzer::Buzzer::new(peripherals.LEDC, peripherals.GPIO45),
-    })
+    }
+    .run()
     .await
 }
