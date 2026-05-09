@@ -11,7 +11,7 @@ use embassy_time::{Duration, Instant, Timer};
 use esp_hal::clock::CpuClock;
 use esp_hal::timer::timg::TimerGroup;
 
-use esp_hal::gpio::{Input, InputConfig, Pin, Pull};
+use esp_hal::gpio::{AnyPin, Input, InputConfig, Pin, Pull};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_println::println;
 
@@ -124,16 +124,32 @@ async fn blink_task(mut led: Output<'static>) {
     }
 }
 
-#[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
-    let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
-    let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let peripherals = esp_hal::init(config);
+struct AppHardware<P> {
+    gpio_btn_refresh: AnyPin<'static>,
+    gpio_btn_previous: AnyPin<'static>,
+    gpio_btn_next: AnyPin<'static>,
+    led_pin: AnyPin<'static>,
+    spi_bus: Spi<'static, esp_hal::Async>,
+    epd: P,
+    i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
+    flash: esp_hal::peripherals::FLASH<'static>,
+    lpwr: esp_hal::peripherals::LPWR<'static>,
+    wifi: esp_hal::peripherals::WIFI<'static>,
+    battery_enable_pin: esp_hal::peripherals::GPIO21<'static>,
+    adc1: esp_hal::peripherals::ADC1<'static>,
+    battery_sense: esp_hal::peripherals::GPIO1<'static>,
+    ledc: esp_hal::peripherals::LEDC<'static>,
+    buzzer_pin: esp_hal::peripherals::GPIO45<'static>,
+}
 
+fn init_runtime(
+    psram: esp_hal::peripherals::PSRAM<'static>,
+    timg0: esp_hal::peripherals::TIMG0<'static>,
+    sw_interrupt: esp_hal::peripherals::SW_INTERRUPT<'static>,
+) {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 73744);
     esp_alloc::psram_allocator!(
-        peripherals.PSRAM,
+        psram,
         esp_hal::psram,
         esp_hal::psram::PsramConfig {
             mode: esp_hal::psram::PsramMode::OctalSpi,
@@ -141,10 +157,21 @@ async fn main(spawner: Spawner) -> ! {
         }
     );
 
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let sw_ints =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let timg0 = TimerGroup::new(timg0);
+    let sw_ints = esp_hal::interrupt::software::SoftwareInterruptControl::new(sw_interrupt);
     esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
+}
+
+#[esp_rtos::main]
+async fn main(spawner: Spawner) -> ! {
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let peripherals = esp_hal::init(config);
+
+    init_runtime(
+        peripherals.PSRAM,
+        peripherals.TIMG0,
+        peripherals.SW_INTERRUPT,
+    );
 
     // Bind semantic board pins to device-specific GPIOs. This is the
     // only place where the silkscreen-to-GPIO and status LED mappings
@@ -245,6 +272,52 @@ async fn main(spawner: Spawner) -> ! {
     #[cfg(all(feature = "e1004", feature = "disable_charger"))]
     let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
 
+    let board = AppHardware {
+        gpio_btn_refresh: gpio_btn_refresh.degrade(),
+        gpio_btn_previous: gpio_btn_previous.degrade(),
+        gpio_btn_next: gpio_btn_next.degrade(),
+        led_pin: led_pin.degrade(),
+        spi_bus: epd_spi_bus,
+        epd,
+        i2c0,
+        flash: peripherals.FLASH,
+        lpwr: peripherals.LPWR,
+        wifi: peripherals.WIFI,
+        battery_enable_pin: peripherals.GPIO21,
+        adc1: peripherals.ADC1,
+        battery_sense: peripherals.GPIO1,
+        ledc: peripherals.LEDC,
+        buzzer_pin: peripherals.GPIO45,
+    };
+
+    run_app(spawner, board).await
+}
+
+async fn run_app<P>(spawner: Spawner, board: AppHardware<P>) -> !
+where
+    P: Panel<Spi<'static, esp_hal::Async>>,
+{
+    let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
+    let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
+
+    let AppHardware {
+        gpio_btn_refresh,
+        gpio_btn_previous,
+        gpio_btn_next,
+        led_pin,
+        spi_bus,
+        epd,
+        i2c0,
+        flash,
+        lpwr,
+        wifi,
+        battery_enable_pin,
+        adc1,
+        battery_sense,
+        ledc,
+        buzzer_pin,
+    } = board;
+
     // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
     // and clear it immediately so stale bits don't carry into the next cycle.
     // The latch is authoritative because it captures the pin state at the
@@ -267,7 +340,7 @@ async fn main(spawner: Spawner) -> ! {
         next_latched,
     );
 
-    let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
+    let rtc = esp_hal::rtc_cntl::Rtc::new(lpwr);
     let time_since_boot = rtc.time_since_power_up();
     println!(
         "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
@@ -281,8 +354,7 @@ async fn main(spawner: Spawner) -> ! {
     // offset/size) or actual flash hardware trouble — panicking there is
     // the right call. A missing *key* is different: that's how we detect
     // "needs configuring" and short-circuit into config mode below.
-    let config =
-        Config::new(peripherals.FLASH).expect("NVS init failed — check partition table and flash");
+    let config = Config::new(flash).expect("NVS init failed — check partition table and flash");
     if config.is_configured().unwrap_or(false) {
         let has_hint = config.get_wifi_hint().ok().flatten().is_some();
         println!(
@@ -324,17 +396,17 @@ async fn main(spawner: Spawner) -> ! {
         spawner,
         rtc,
         wake_action,
-        wifi: peripherals.WIFI,
-        battery_enable: Output::new(peripherals.GPIO21, Level::Low, OutputConfig::default()),
-        adc1: peripherals.ADC1,
-        battery_sense: peripherals.GPIO1,
+        wifi,
+        battery_enable: Output::new(battery_enable_pin, Level::Low, OutputConfig::default()),
+        adc1,
+        battery_sense,
         i2c0,
-        gpio_btn_refresh: gpio_btn_refresh.degrade(),
-        gpio_btn_previous: gpio_btn_previous.degrade(),
-        gpio_btn_next: gpio_btn_next.degrade(),
-        spi_bus: epd_spi_bus,
+        gpio_btn_refresh,
+        gpio_btn_previous,
+        gpio_btn_next,
+        spi_bus,
         epd,
-        buzzer: epd_photoframe::buzzer::Buzzer::new(peripherals.LEDC, peripherals.GPIO45),
+        buzzer: epd_photoframe::buzzer::Buzzer::new(ledc, buzzer_pin),
     };
 
     // --- Panic-render fast path -----------------------------------------
