@@ -1,15 +1,6 @@
 #![no_std]
 extern crate alloc;
 
-#[cfg(all(feature = "e1001", feature = "e1002"))]
-compile_error!("features `e1001` and `e1002` are mutually exclusive");
-#[cfg(all(feature = "e1001", feature = "e1004"))]
-compile_error!("features `e1001` and `e1004` are mutually exclusive");
-#[cfg(all(feature = "e1002", feature = "e1004"))]
-compile_error!("features `e1002` and `e1004` are mutually exclusive");
-#[cfg(not(any(feature = "e1001", feature = "e1002", feature = "e1004")))]
-compile_error!("enable one of the device features: `e1001`, `e1002`, or `e1004`");
-
 pub mod app;
 pub mod battery;
 pub mod button;

@@ -19,12 +19,6 @@ use esp_hal::spi::master::Spi;
 extern crate alloc;
 
 use epd_photoframe::app::{AppHardware, init_runtime, run_app};
-
-#[cfg(feature = "e1002")]
-use epd_photoframe::panel::gdep073e01::Gdep073e01;
-#[cfg(feature = "e1001")]
-use epd_photoframe::panel::gdey075t7::Gdey075t7;
-#[cfg(feature = "e1004")]
 use epd_photoframe::panel::t133a01::T133A01;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -42,18 +36,6 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.SW_INTERRUPT,
     );
 
-    // Bind semantic board pins to device-specific GPIOs. This is the
-    // only place where the silkscreen-to-GPIO and status LED mappings
-    // appear; everything downstream uses the semantic local names.
-    // E1001 inherits the E1002 mapping (same hardware aside from the panel).
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next, led_pin) = (
-        peripherals.GPIO3,
-        peripherals.GPIO5,
-        peripherals.GPIO4,
-        peripherals.GPIO6,
-    );
-    #[cfg(feature = "e1004")]
     let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next, led_pin) = (
         peripherals.GPIO5,
         peripherals.GPIO4,
@@ -61,12 +43,6 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO48,
     );
 
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    // E1001 / E1002 appear to have an SY6974B on I2C1, but it is not
-    // accessible from this firmware setup, so normal-mode power status
-    // reporting is disabled for them.
-    let (refresh_button_label, has_sy6974b) = ("Refresh button (green)", false);
-    #[cfg(feature = "e1004")]
     let (refresh_button_label, has_sy6974b) = ("Refresh button", true);
 
     // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
@@ -79,44 +55,12 @@ async fn main(spawner: Spawner) -> ! {
     )
     .unwrap();
 
-    #[cfg(any(feature = "e1001", feature = "e1002"))]
-    let mut epd_spi_bus = epd_spi_bus
-        .with_sck(peripherals.GPIO7)
-        .with_mosi(peripherals.GPIO9)
-        .into_async();
-
-    #[cfg(feature = "e1004")]
     let mut epd_spi_bus = epd_spi_bus
         .with_sck(peripherals.GPIO7)
         .with_miso(peripherals.GPIO8)
         .with_mosi(peripherals.GPIO9)
         .into_async();
 
-    #[cfg(feature = "e1001")]
-    let epd = Gdey075t7::new(
-        &mut epd_spi_bus,
-        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
-        Input::new(
-            peripherals.GPIO13,
-            InputConfig::default().with_pull(Pull::Up),
-        ),
-        Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
-        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
-    );
-
-    #[cfg(feature = "e1002")]
-    let epd = Gdep073e01::new(
-        &mut epd_spi_bus,
-        Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
-        Input::new(
-            peripherals.GPIO13,
-            InputConfig::default().with_pull(Pull::Up),
-        ),
-        Output::new(peripherals.GPIO11, Level::Low, OutputConfig::default()),
-        Output::new(peripherals.GPIO12, Level::Low, OutputConfig::default()),
-    );
-
-    #[cfg(feature = "e1004")]
     let epd = T133A01::new(
         &mut epd_spi_bus,
         Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default()),
@@ -146,7 +90,7 @@ async fn main(spawner: Spawner) -> ! {
     // anything else runs so the system rail spends as little time as
     // possible drawing through VBUS. This must happen after I²C0 is up
     // (the chip lives on this bus).
-    #[cfg(all(feature = "e1004", feature = "disable_charger"))]
+    #[cfg(feature = "disable_charger")]
     let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
 
     let board = AppHardware {
