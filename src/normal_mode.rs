@@ -16,11 +16,12 @@ use embedded_io_async::Read;
 use esp_hal::gpio::{Input, InputConfig, Output, Pull};
 use esp_println::println;
 
+use crate::app::AppContext;
 use crate::battery;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::error_image;
-use crate::hardware::{AppContext, WakeAction};
+use crate::hardware::WakeAction;
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::sht40;

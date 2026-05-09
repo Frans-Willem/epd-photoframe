@@ -27,8 +27,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use esp_println::println;
 
+use crate::app::AppContext;
 use crate::error_image;
-use crate::hardware::AppContext;
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::uart::wait_for_tx_idle;

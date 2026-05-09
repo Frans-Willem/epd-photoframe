@@ -15,10 +15,10 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::spi::master::Spi;
 use esp_println::println;
 
+use crate::app::AppContext;
 use crate::button::wait_for_press;
 use crate::config::Config;
 use crate::config_image;
-use crate::hardware::AppContext;
 use crate::net_resources::NETWORK_RESOURCES;
 use crate::panel::{Panel, PanelColor};
 
