@@ -11,7 +11,7 @@ const SINGLE_BYTE_WRITE: bool = false;
 const PANEL_WIDTH: usize = 1200;
 const PANEL_HEIGHT: usize = 1600;
 
-#[allow(non_camel_case_types, dead_code)]
+#[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
 #[derive(Copy, Clone)]
 enum Command {
     PanelSetting = 0x00, // PSR
@@ -112,8 +112,7 @@ pub struct T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> {
     en: En,
 }
 
-impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
-    T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
     CsMaster: OutputPin,
     CsSlave: OutputPin,
@@ -145,8 +144,7 @@ where
     }
 }
 
-impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
-    T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
+impl<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En> T133A01<Spi, CsMaster, CsSlave, Busy, Dc, Rst, En>
 where
     Spi: SpiBus,
     CsMaster: OutputPin,

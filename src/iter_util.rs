@@ -26,10 +26,10 @@ impl<I: Iterator, const N: usize> Iterator for ChunksHeapless<I, N> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let mut ret = heapless::Vec::new();
-        if let Some(stored) = self.stored.take() {
-            if let Err(stored) = ret.push(stored) {
-                self.stored = Some(stored);
-            }
+        if let Some(stored) = self.stored.take()
+            && let Err(stored) = ret.push(stored)
+        {
+            self.stored = Some(stored);
         }
         while self.stored.is_none()
             && let Some(next) = self.inner.next()

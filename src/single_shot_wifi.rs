@@ -105,8 +105,8 @@ impl Error {
             Error::Init(e) => format!("WiFi init failed: {:?}", e),
             Error::Connect(e) => format!("WiFi connect failed: {:?}\nSSID: {}", e, ssid),
             Error::Timeout => format!("WiFi setup timed out\nSSID: {}", ssid),
-            Error::CredentialsError => format!("WiFi credentials read failed"),
-            Error::EmptyCredentials => format!("WiFi credentials missing"),
+            Error::CredentialsError => String::from("WiFi credentials read failed"),
+            Error::EmptyCredentials => String::from("WiFi credentials missing"),
         }
     }
 }
@@ -228,10 +228,7 @@ where
                 .clone()
                 .with_bssid(h.bssid)
                 .with_channel(h.channel);
-            (
-                pinned,
-                Some(esp_radio::wifi::Config::Station(base_sta_cfg)),
-            )
+            (pinned, Some(esp_radio::wifi::Config::Station(base_sta_cfg)))
         }
         None => {
             println!("WiFi hint: none (cold boot or stale; will scan)");
@@ -362,8 +359,12 @@ async fn wifi_runner<'d, S: WifiCredStore + ?Sized>(
                     Ok(info) => {
                         println!(
                             "Connected to BSSID {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} on channel {}",
-                            info.bssid[0], info.bssid[1], info.bssid[2],
-                            info.bssid[3], info.bssid[4], info.bssid[5],
+                            info.bssid[0],
+                            info.bssid[1],
+                            info.bssid[2],
+                            info.bssid[3],
+                            info.bssid[4],
+                            info.bssid[5],
                             info.channel
                         );
                         // We're already associated; a hint-write

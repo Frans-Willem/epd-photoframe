@@ -83,6 +83,11 @@ pub static POWER_STATUS: embassy_sync::signal::Signal<
     Option<sy6974b::PowerStatus>,
 > = embassy_sync::signal::Signal::new();
 
+struct FrameWithPalette<C> {
+    frame: Vec<C>,
+    palette: Vec<C>,
+}
+
 /// Sensor task. Spawned at boot, signals into the [`BATTERY_MV`] /
 /// [`TEMP_HUMIDITY`] / [`POWER_STATUS`] slots. Battery (ADC + GPIO21)
 /// is independent of I²C0, so it runs in parallel with the I²C-bound
@@ -314,7 +319,7 @@ where
     // error path can still honour it. `try_decode_frame` returns
     // both the row-major frame and the actual PNG palette (sized to
     // `1 << bit_depth`) so the caller can pick a panel init mode.
-    let frame_result: Result<(Vec<P::Color>, Vec<P::Color>), String>;
+    let frame_result: Result<FrameWithPalette<P::Color>, String>;
     let hint: Option<RefreshHint>;
     match fetch_result {
         Ok((body, h)) => {
@@ -335,14 +340,14 @@ where
     // absolute `Instant` so the time we then spend on the panel refresh
     // + UART flush is automatically subtracted from the sleep duration
     // when we compute it below.
-    let (frame, palette, wakeup_requested): (_, Vec<P::Color>, embassy_time::Instant) =
+    let (frame, wakeup_requested): (FrameWithPalette<P::Color>, embassy_time::Instant) =
         match frame_result {
-            Ok((frame, palette)) => {
-                match hint.as_ref().and_then(|h| h.url_override.as_deref()) {
+            Ok(frame) => {
+                if let Some(raw) = hint.as_ref().and_then(|h| h.url_override.as_deref()) {
                     // The server often sends relative URLs (e.g. just
                     // `/screen/foo`), so resolve against whatever we just
                     // fetched rather than the NVS base.
-                    Some(raw) => match url_util::resolve(&current_url, raw) {
+                    match url_util::resolve(&current_url, raw) {
                         Some(abs) => {
                             match heapless::String::<STORED_URL_MAX>::try_from(abs.as_str()) {
                                 Ok(stored) => {
@@ -362,16 +367,12 @@ where
                             println!("Unresolvable redirect URL {:?}; dropping", raw);
                             REDIRECT_URL.clear();
                         }
-                    },
-                    // No pending redirect from the server — leave the slot
-                    // empty (already cleared on entry for non-Timer wakes;
-                    // `take()`n on entry for Timer wakes).
-                    None => {}
+                    }
                 }
                 let wakeup = hint
                     .map(|h| h.refresh_time)
                     .unwrap_or_else(|| embassy_time::Instant::now() + DEFAULT_SUCCESS_SLEEP);
-                (frame, palette, wakeup)
+                (frame, wakeup)
             }
             Err(msg) => {
                 println!("Falling back to error image: {}", msg);
@@ -387,12 +388,15 @@ where
                 // The error image is rendered with `BLACK` and `WHITE` only,
                 // so its effective palette is exactly those two colours.
                 (
-                    error_image::render(panel_width, panel_height, &msg, Some(retry_in)),
-                    Vec::from([P::Color::BLACK, P::Color::WHITE]),
+                    FrameWithPalette {
+                        frame: error_image::render(panel_width, panel_height, &msg, Some(retry_in)),
+                        palette: Vec::from([P::Color::BLACK, P::Color::WHITE]),
+                    },
                     wakeup,
                 )
             }
         };
+    let FrameWithPalette { frame, palette } = frame;
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
     //
@@ -451,7 +455,7 @@ where
             gpio_btn_next.reborrow(),
             InputConfig::default().with_pull(Pull::Up),
         );
-        use embassy_futures::select::{select4, Either4};
+        use embassy_futures::select::{Either4, select4};
         match select4(
             panel_update,
             wait_for_press(&mut refresh_in, BUTTON_DEBOUNCE),
@@ -562,9 +566,12 @@ async fn try_fetch<'t>(
             .query(&host, embassy_net::dns::DnsQueryType::A)
             .await
             .map_err(|e| format!("DNS {}: {:?}", host, e))?;
-        let v4 = addrs.iter().find_map(|a| match a {
-            embassy_net::IpAddress::Ipv4(v) => Some(*v),
-        });
+        let v4 = addrs
+            .iter()
+            .map(|a| match a {
+                embassy_net::IpAddress::Ipv4(v) => *v,
+            })
+            .next();
         v4.ok_or_else(|| format!("DNS: no A record for {}", host))?
     };
     let addr = SocketAddr::new(IpAddr::V4(ip), port);
@@ -707,15 +714,16 @@ async fn try_fetch<'t>(
 /// are by far the biggest transient allocations in the fetch cycle, and
 /// we run with WiFi off while they're in flight.
 ///
-/// Returns `(frame, palette)`. The palette holds exactly the
-/// `1 << bit_depth` real PNG palette entries (2 for 1bpp, 4 for 2bpp,
-/// …) — the caller passes it to [`Panel::init_mode_for_palette`] to
-/// pick the cheapest panel init mode that covers the content.
+/// Returns a [`FrameWithPalette`] containing the row-major frame and PNG
+/// palette. The palette holds exactly the `1 << bit_depth` real PNG
+/// palette entries (2 for 1bpp, 4 for 2bpp, …) — the caller passes it
+/// to [`Panel::init_mode_for_palette`] to pick the cheapest panel init
+/// mode that covers the content.
 fn try_decode_frame<C: PanelColor>(
     body: &[u8],
     panel_width: usize,
     panel_height: usize,
-) -> Result<(Vec<C>, Vec<C>), String> {
+) -> Result<FrameWithPalette<C>, String> {
     use embedded_graphics::pixelcolor::Rgb888;
     println!("Decode PNG");
     let header = minipng::decode_png_header(body).map_err(|e| format!("PNG header: {:?}", e))?;
@@ -809,7 +817,10 @@ fn try_decode_frame<C: PanelColor>(
             frame.push(png_palette[palette_index as usize]);
         }
     }
-    Ok((frame, png_palette))
+    Ok(FrameWithPalette {
+        frame,
+        palette: png_palette,
+    })
 }
 
 /// Extract the palette index for pixel `x` in a row packed at `bit_depth`

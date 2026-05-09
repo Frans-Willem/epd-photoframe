@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+echo "Checking Rust formatting..."
+cargo fmt --check
+
+echo "Checking clippy for e1001..."
+cargo clippy --features e1001 -- -D warnings
+
+echo "Checking clippy for e1002..."
+cargo clippy --features e1002 -- -D warnings
+
+echo "Checking clippy for e1004 + disable_charger..."
+cargo clippy --features e1004,disable_charger -- -D warnings

@@ -76,11 +76,11 @@ pub async fn read_battery(
     let mut adc = Adc::new(adc_peripheral, adc_config);
 
     let mut samples = [0u16; SAMPLE_COUNT];
-    for i in 0..SAMPLE_COUNT {
+    for (i, sample) in samples.iter_mut().enumerate() {
         if i > 0 {
             Timer::after(SAMPLE_INTERVAL).await;
         }
-        samples[i] = adc.read_blocking(&mut adc_pin);
+        *sample = adc.read_blocking(&mut adc_pin);
     }
     enable_pin.set_low();
 

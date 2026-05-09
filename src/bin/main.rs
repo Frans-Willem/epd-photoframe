@@ -12,13 +12,13 @@ use esp_hal::clock::CpuClock;
 use esp_hal::gpio::{Input, InputConfig, Pin, Pull};
 use esp_hal::gpio::{Level, Output, OutputConfig};
 
+use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::Config as SpiConfig;
 use esp_hal::spi::master::Spi;
-use esp_hal::spi::Mode as SpiMode;
 
 extern crate alloc;
 
-use epd_photoframe::app::{init_runtime, run_app, AppHardware};
+use epd_photoframe::app::{AppHardware, init_runtime, run_app};
 
 #[cfg(feature = "e1002")]
 use epd_photoframe::panel::gdep073e01::Gdep073e01;
