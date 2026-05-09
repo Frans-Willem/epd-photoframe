@@ -25,7 +25,7 @@ extern crate alloc;
 
 use epd_photoframe::config::Config;
 use epd_photoframe::config_mode;
-use epd_photoframe::hardware::{EpdColor, EpdPanel, HardwareCtx, WakeAction};
+use epd_photoframe::hardware::{HardwareCtx, WakeAction};
 use epd_photoframe::panel::{Panel, PanelColor};
 use epd_photoframe::panic_mode;
 
@@ -223,14 +223,24 @@ async fn main(spawner: Spawner) -> ! {
         let has_hint = config.get_wifi_hint().ok().flatten().is_some();
         println!(
             "Config in use: wifi.ssid={:?} wifi.pass=<{} chars> image.url={:?} wifi.hint={}",
-            config.get_wifi_ssid().ok().flatten().as_deref().unwrap_or(""),
+            config
+                .get_wifi_ssid()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
             config
                 .get_wifi_password()
                 .ok()
                 .flatten()
                 .map(|p| p.len())
                 .unwrap_or(0),
-            config.get_image_url().ok().flatten().as_deref().unwrap_or(""),
+            config
+                .get_image_url()
+                .ok()
+                .flatten()
+                .as_deref()
+                .unwrap_or(""),
             if has_hint { "present" } else { "none" },
         );
     } else {
@@ -389,10 +399,10 @@ async fn main(spawner: Spawner) -> ! {
 /// clean two-arm `if let … else …` at the call site rather than
 /// "one arm calls a `-> !` function and the rest of the function
 /// implicitly only runs on the other arm".
-async fn run_normal_boot(
-    mut hw: HardwareCtx,
-    config: Config<'static>,
-) -> ! {
+async fn run_normal_boot<P>(mut hw: HardwareCtx<P>, config: Config<'static>) -> !
+where
+    P: Panel<Spi<'static, esp_hal::Async>>,
+{
     // Past the panic-render decision: any panic from here on is
     // happening in a "normal" cycle, so the handler is allowed to
     // stash + soft-reset (release builds) instead of halting. See
@@ -419,7 +429,7 @@ async fn run_normal_boot(
         println!("Init");
         // Ask the panel which init mode covers an all-white palette;
         // on E1001 that's `Bw`, single-mode panels return `()`.
-        let init_mode = EpdPanel::init_mode_for_palette([EpdColor::WHITE]);
+        let init_mode = P::init_mode_for_palette([P::Color::WHITE]);
         hw.epd.init(&mut hw.spi_bus, init_mode).await.unwrap();
         println!("Power on");
         hw.epd.power_on(&mut hw.spi_bus).await.unwrap();
@@ -427,7 +437,7 @@ async fn run_normal_boot(
         hw.epd
             .update_frame(
                 &mut hw.spi_bus,
-                (0..(EpdPanel::WIDTH * EpdPanel::HEIGHT)).map(|_| EpdColor::WHITE),
+                (0..(P::WIDTH * P::HEIGHT)).map(|_| P::Color::WHITE),
             )
             .await
             .unwrap();

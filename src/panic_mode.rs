@@ -28,7 +28,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use esp_println::println;
 
 use crate::error_image;
-use crate::hardware::{EpdColor, EpdPanel, HardwareCtx};
+use crate::hardware::HardwareCtx;
 use crate::panel::{Panel, PanelColor};
 use crate::rtc_persisted::RtcPersisted;
 use crate::uart::wait_for_tx_idle;
@@ -196,7 +196,10 @@ fn force_led_on() {
 /// rendered frame also omits the "Will retry in …" line that
 /// transient-error frames carry, since there's nothing scheduled to
 /// retry.
-pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
+pub async fn run<P>(ctx: HardwareCtx<P>, message: &str) -> !
+where
+    P: Panel<esp_hal::spi::master::Spi<'static, esp_hal::Async>>,
+{
     let HardwareCtx {
         rtc,
         mut gpio_btn_refresh,
@@ -210,10 +213,10 @@ pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
     println!("PANIC_MSG present; rendering panic frame");
     println!("Panic: {}", message);
 
-    let panel_width = EpdPanel::WIDTH;
-    let panel_height = EpdPanel::HEIGHT;
-    let frame: Vec<EpdColor> = error_image::render(panel_width, panel_height, message, None);
-    let init_mode = EpdPanel::init_mode_for_palette([EpdColor::BLACK, EpdColor::WHITE]);
+    let panel_width = P::WIDTH;
+    let panel_height = P::HEIGHT;
+    let frame: Vec<P::Color> = error_image::render(panel_width, panel_height, message, None);
+    let init_mode = P::init_mode_for_palette([P::Color::BLACK, P::Color::WHITE]);
 
     // Bring the panel's enable rail up before any panel I/O.
     epd.enable().await.unwrap();
@@ -229,7 +232,7 @@ pub async fn run(ctx: HardwareCtx, message: &str) -> ! {
     epd.update_frame(
         &mut spi_bus,
         (0..(panel_width * panel_height)).map(|idx| {
-            let (x, y) = EpdPanel::output_index_to_image_xy(idx);
+            let (x, y) = P::output_index_to_image_xy(idx);
             frame[y * panel_width + x]
         }),
     )
