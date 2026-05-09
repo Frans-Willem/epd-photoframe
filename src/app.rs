@@ -62,6 +62,8 @@ pub struct AppHardware<P> {
     pub gpio_btn_previous: AnyPin<'static>,
     pub gpio_btn_next: AnyPin<'static>,
     pub led_pin: AnyPin<'static>,
+    pub refresh_button_label: &'static str,
+    pub has_sy6974b: bool,
     pub spi_bus: Spi<'static, esp_hal::Async>,
     pub epd: P,
     pub i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
@@ -84,6 +86,8 @@ pub struct AppContext<P> {
     pub rtc: esp_hal::rtc_cntl::Rtc<'static>,
     pub wake_action: WakeAction,
     pub wifi: esp_hal::peripherals::WIFI<'static>,
+    pub refresh_button_label: &'static str,
+    pub has_sy6974b: bool,
 
     /// Sensor hardware used only by the normal refresh flow to populate
     /// battery / temperature / humidity / charger status URL parameters.
@@ -137,14 +141,13 @@ pub async fn run_app<P>(spawner: Spawner, board: AppHardware<P>) -> !
 where
     P: Panel<Spi<'static, esp_hal::Async>>,
 {
-    let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
-    let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
-
     let AppHardware {
         gpio_btn_refresh,
         gpio_btn_previous,
         gpio_btn_next,
         led_pin,
+        refresh_button_label,
+        has_sy6974b,
         spi_bus,
         epd,
         i2c0,
@@ -157,6 +160,11 @@ where
         ledc,
         buzzer_pin,
     } = board;
+
+    panic_mode::set_panic_led(led_pin.number());
+
+    let reset_reason = esp_hal::rtc_cntl::reset_reason(esp_hal::system::Cpu::ProCpu);
+    let wake_reason = esp_hal::rtc_cntl::wakeup_cause();
 
     // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
     // and clear it immediately so stale bits don't carry into the next cycle.
@@ -237,6 +245,8 @@ where
         rtc,
         wake_action,
         wifi,
+        refresh_button_label,
+        has_sy6974b,
         battery_enable: Output::new(battery_enable_pin, Level::Low, OutputConfig::default()),
         adc1,
         battery_sense,

@@ -61,6 +61,14 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO48,
     );
 
+    #[cfg(any(feature = "e1001", feature = "e1002"))]
+    // E1001 / E1002 appear to have an SY6974B on I2C1, but it is not
+    // accessible from this firmware setup, so normal-mode power status
+    // reporting is disabled for them.
+    let (refresh_button_label, has_sy6974b) = ("Refresh button (green)", false);
+    #[cfg(feature = "e1004")]
+    let (refresh_button_label, has_sy6974b) = ("Refresh button", true);
+
     // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
     let epd_spi_bus = Spi::new(
         peripherals.SPI2,
@@ -146,6 +154,8 @@ async fn main(spawner: Spawner) -> ! {
         gpio_btn_previous: gpio_btn_previous.degrade(),
         gpio_btn_next: gpio_btn_next.degrade(),
         led_pin: led_pin.degrade(),
+        refresh_button_label,
+        has_sy6974b,
         spi_bus: epd_spi_bus,
         epd,
         i2c0,

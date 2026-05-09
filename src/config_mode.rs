@@ -32,6 +32,7 @@ where
         spawner,
         wifi,
         gpio_btn_refresh,
+        refresh_button_label,
         spi_bus,
         epd,
         mut buzzer,
@@ -104,13 +105,22 @@ where
     spawner.spawn(net_task(net_runner).unwrap());
     spawner.spawn(dhcp_server_task(net_stack).unwrap());
     spawner.spawn(dns_hijack_task(net_stack).unwrap());
-    spawner.spawn(portal::web_task(net_stack, stored_ssid, stored_url, password_is_set).unwrap());
+    spawner.spawn(
+        portal::web_task(
+            net_stack,
+            stored_ssid,
+            stored_url,
+            password_is_set,
+            refresh_button_label,
+        )
+        .unwrap(),
+    );
 
     // Run panel rendering alongside the save / Refresh race. If panel
     // rendering finishes first, config mode keeps serving the portal; if
     // the user exits first, software reset interrupts the render and the
     // next boot's own panel reset recovers.
-    let panel_rendering = panel_render_task(spi_bus, epd, ap_ssid);
+    let panel_rendering = panel_render_task(spi_bus, epd, ap_ssid, refresh_button_label);
 
     let wait_and_save = async {
         // Two exits from config mode:
@@ -186,6 +196,7 @@ async fn panel_render_task<P>(
     mut spi_bus: Spi<'static, esp_hal::Async>,
     mut epd: P,
     ap_ssid: String,
+    refresh_button_label: &'static str,
 ) where
     P: Panel<Spi<'static, esp_hal::Async>>,
 {
@@ -203,8 +214,7 @@ async fn panel_render_task<P>(
          Then open: http://192.168.4.1/\n\
          \n\
          Press the {} to exit without saving.",
-        ap_ssid,
-        portal::REFRESH_BUTTON_LABEL
+        ap_ssid, refresh_button_label
     );
     println!("Rendering config screen with QR: {}", qr_payload);
     let frame =
