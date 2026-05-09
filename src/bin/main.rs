@@ -137,36 +137,16 @@ async fn main(spawner: Spawner) -> ! {
     // the rest of main() is device-agnostic. E1001 inherits the E1002
     // mapping (same hardware aside from the panel).
     #[cfg(any(feature = "e1001", feature = "e1002"))]
-    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
+    let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next) =
         (peripherals.GPIO3, peripherals.GPIO5, peripherals.GPIO4);
     #[cfg(feature = "e1004")]
-    let (mut gpio_btn_refresh, mut gpio_btn_previous, mut gpio_btn_next) =
+    let (gpio_btn_refresh, gpio_btn_previous, gpio_btn_next) =
         (peripherals.GPIO5, peripherals.GPIO4, peripherals.GPIO3);
-
-    // Read all three buttons ASAP so we capture the press even if the user
-    // releases quickly after powering the device out of deep sleep.
-    let refresh_held = Input::new(
-        gpio_btn_refresh.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
-    let previous_held = Input::new(
-        gpio_btn_previous.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
-    let next_held = Input::new(
-        gpio_btn_next.reborrow(),
-        InputConfig::default().with_pull(Pull::Up),
-    )
-    .is_low();
 
     // Snapshot the RTC-IO wake latch (which pin actually triggered the wake)
     // and clear it immediately so stale bits don't carry into the next cycle.
     // The latch is authoritative because it captures the pin state at the
-    // exact moment of wake — even a sub-millisecond tap is recorded, whereas
-    // the current-level read above misses anything released during the
-    // ~300 ms bootloader window.
+    // exact moment of wake — even a sub-millisecond tap is recorded.
     let button_bits = (1u32 << gpio_btn_refresh.number())
         | (1u32 << gpio_btn_previous.number())
         | (1u32 << gpio_btn_next.number());
@@ -189,7 +169,6 @@ async fn main(spawner: Spawner) -> ! {
     println!(
         "Device booting up - reset={reset_reason:?} wake={wake_reason:?} action={wake_action:?} \
          latched[refresh={refresh_latched} previous={previous_latched} next={next_latched}] \
-         held[refresh={refresh_held} previous={previous_held} next={next_held}] \
          uptime={time_since_boot:?}"
     );
     println!(
