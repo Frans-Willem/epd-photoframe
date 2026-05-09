@@ -10,7 +10,7 @@ use embedded_hal_async::spi::SpiBus;
 // Panel: GooDisplay GDEP073E01 (800x480, Spectra 6, found in reTerminal E1002).
 // Controller appears similar to UC8159 / SPD1656.
 
-#[allow(non_camel_case_types, dead_code)]
+#[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
 #[derive(Copy, Clone)]
 enum Command {
     PanelSetting = 0x00,

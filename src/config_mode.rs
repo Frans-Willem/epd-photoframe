@@ -146,10 +146,10 @@ where
                 if let Err(e) = nvs.set_wifi_ssid(&creds.ssid) {
                     println!("WARNING: failed to write wifi.ssid: {:?}", e);
                 }
-                if let Some(pw) = creds.password.as_deref() {
-                    if let Err(e) = nvs.set_wifi_password(pw) {
-                        println!("WARNING: failed to write wifi.pass: {:?}", e);
-                    }
+                if let Some(pw) = creds.password.as_deref()
+                    && let Err(e) = nvs.set_wifi_password(pw)
+                {
+                    println!("WARNING: failed to write wifi.pass: {:?}", e);
                 }
                 if let Err(e) = nvs.set_image_url(&creds.url) {
                     println!("WARNING: failed to write image.url: {:?}", e);
