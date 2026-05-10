@@ -362,17 +362,6 @@ async fn blink_task(mut led: Output<'static>) {
     }
 }
 
-fn four_color_preflash_palette<C: PanelColor>() -> Option<[C; 4]> {
-    let mut colors = C::all();
-    let palette = [
-        colors.next()?,
-        colors.next()?,
-        colors.next()?,
-        colors.next()?,
-    ];
-    colors.next().is_none().then_some(palette)
-}
-
 /// The non-panic boot path: flip the panic-reboot guard on, kick off
 /// the white pre-flash, run the config-mode hold race, and dispatch
 /// to either `normal_mode::run` (we have credentials and the user isn't
@@ -405,28 +394,17 @@ where
         println!("Wait until idle");
         hw.epd.wait_until_idle().await.unwrap();
         println!("Init");
-        // On four-colour panels, use the pre-flash as a quick visual
-        // swatch test. Other panels keep the original all-white flash.
-        let preflash_palette = four_color_preflash_palette::<P::Color>();
-        let init_mode = match preflash_palette {
-            Some(palette) => P::init_mode_for_palette(palette),
-            None => P::init_mode_for_palette([P::Color::WHITE]),
-        };
+        // Ask the panel which init mode covers an all-white palette;
+        // on E1001 that's `Bw`, single-mode panels return `()`.
+        let init_mode = P::init_mode_for_palette([P::Color::WHITE]);
         hw.epd.init(&mut hw.spi_bus, init_mode).await.unwrap();
         println!("Power on");
         hw.epd.power_on(&mut hw.spi_bus).await.unwrap();
-        println!("Update frame (pre-flash)");
+        println!("Update frame (white)");
         hw.epd
             .update_frame(
                 &mut hw.spi_bus,
-                (0..(P::WIDTH * P::HEIGHT)).map(|idx| match preflash_palette {
-                    Some(palette) => {
-                        let x = idx % P::WIDTH;
-                        let band = (x * 4) / P::WIDTH;
-                        palette[band]
-                    }
-                    None => P::Color::WHITE,
-                }),
+                (0..(P::WIDTH * P::HEIGHT)).map(|_| P::Color::WHITE),
             )
             .await
             .unwrap();
