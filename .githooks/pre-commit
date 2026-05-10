@@ -4,11 +4,8 @@ set -eu
 echo "Checking Rust formatting..."
 cargo fmt --check
 
-echo "Checking clippy for e1001..."
-cargo clippy --features e1001 -- -D warnings
-
-echo "Checking clippy for e1002..."
-cargo clippy --features e1002 -- -D warnings
+echo "Checking clippy for all binaries..."
+cargo clippy --bins -- -D warnings
 
 echo "Checking clippy for e1004 + disable_charger..."
-cargo clippy --features e1004,disable_charger -- -D warnings
+cargo clippy --bin e1004 --features disable_charger -- -D warnings
