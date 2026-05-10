@@ -416,8 +416,8 @@ where
                 self.command(spi, Command::Lut20Vcom, LUT_VCOM_4G_FAST)
                     .await?;
                 self.command(spi, Command::Lut21Ww, LUT_BB_4G_FAST).await?;
-                self.command(spi, Command::Lut22Bw, LUT_WB_4G_FAST).await?;
-                self.command(spi, Command::Lut23Wb, LUT_BW_4G_FAST).await?;
+                self.command(spi, Command::Lut22Bw, LUT_BW_4G_FAST).await?;
+                self.command(spi, Command::Lut23Wb, LUT_WB_4G_FAST).await?;
                 self.command(spi, Command::Lut24Bb, LUT_WW_4G_FAST).await?;
                 self.command(spi, Command::Lut25Bd, LUT_BD_4G_FAST).await?;
             }
