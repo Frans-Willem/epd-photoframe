@@ -31,6 +31,28 @@ impl<C: PixelColor> Canvas<C> {
         }
     }
 
+    /// Allocate a `width × height` canvas initialized from a coordinate
+    /// function.
+    pub fn new_with<F>(width: u32, height: u32, mut color_at: F) -> Self
+    where
+        F: FnMut(u32, u32) -> C,
+    {
+        let len = (width as usize) * (height as usize);
+        let mut idx = 0;
+        let mut pixels = Vec::new();
+        pixels.resize_with(len, || {
+            let x = idx % width;
+            let y = idx / width;
+            idx += 1;
+            color_at(x, y)
+        });
+        Self {
+            pixels,
+            width,
+            height,
+        }
+    }
+
     /// Consume the canvas and return its underlying row-major pixel
     /// buffer.
     pub fn into_vec(self) -> Vec<C> {

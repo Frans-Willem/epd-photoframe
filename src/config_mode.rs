@@ -28,6 +28,12 @@ pub async fn run<P>(ctx: AppContext<P>, mut nvs: Config<'static>) -> !
 where
     P: Panel<Spi<'static, esp_hal::Async>>,
 {
+    // Entering config mode deliberately resets the device's "what's displayed"
+    // state: whatever URL was committed last cycle (and any pending redirect)
+    // is no longer relevant once the user has reconfigured.
+    crate::normal_mode::CURRENT_URL.clear();
+    crate::normal_mode::REDIRECT_URL.clear();
+
     let AppContext {
         spawner,
         wifi,

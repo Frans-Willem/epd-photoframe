@@ -32,6 +32,16 @@ pub enum WakeAction {
     Next,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum BootButtonHold {
+    PrevNextHeld,
+    AllHeld,
+    NoneHeld,
+}
+
+const BOOT_BUTTON_HOLD_DURATION: Duration = Duration::from_secs(10);
+
 impl WakeAction {
     /// Name of the `action=` query-string parameter to append to the
     /// base URL, or `None` if the base URL should be fetched unchanged.
@@ -362,6 +372,52 @@ async fn blink_task(mut led: Output<'static>) {
     }
 }
 
+async fn check_boot_button_hold(
+    refresh: &mut AnyPin<'static>,
+    previous: &mut AnyPin<'static>,
+    next: &mut AnyPin<'static>,
+) -> BootButtonHold {
+    let mut refresh_input = Input::new(
+        refresh.reborrow(),
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let mut previous_input = Input::new(
+        previous.reborrow(),
+        InputConfig::default().with_pull(Pull::Up),
+    );
+    let mut next_input = Input::new(next.reborrow(), InputConfig::default().with_pull(Pull::Up));
+    let hold_deadline = Instant::MIN + BOOT_BUTTON_HOLD_DURATION;
+
+    // First give all three buttons the full hold window. If the timeout wins,
+    // all three buttons stayed pressed long enough to enter test mode.
+    match embassy_futures::select::select4(
+        refresh_input.wait_for_high(),
+        previous_input.wait_for_high(),
+        next_input.wait_for_high(),
+        Timer::at(hold_deadline),
+    )
+    .await
+    {
+        embassy_futures::select::Either4::Fourth(_) => return BootButtonHold::AllHeld,
+        embassy_futures::select::Either4::First(_) => (),
+        _ => return BootButtonHold::NoneHeld,
+    }
+
+    // Refresh was released before the hold window expired. Keep waiting until
+    // the original deadline: if Previous and Next stay pressed, enter config
+    // mode; if either is released first, continue normal boot.
+    match embassy_futures::select::select3(
+        previous_input.wait_for_high(),
+        next_input.wait_for_high(),
+        Timer::at(hold_deadline),
+    )
+    .await
+    {
+        embassy_futures::select::Either3::Third(_) => BootButtonHold::PrevNextHeld,
+        _ => BootButtonHold::NoneHeld,
+    }
+}
+
 /// The non-panic boot path: flip the panic-reboot guard on, kick off
 /// the white pre-flash, run the config-mode hold race, and dispatch
 /// to either `normal_mode::run` (we have credentials and the user isn't
@@ -412,42 +468,19 @@ where
         hw.epd.display_frame_no_wait(&mut hw.spi_bus).await.unwrap();
     }
 
-    // If NVS didn't produce a full set of credentials we go straight to
-    // config mode without the button race. Otherwise: race a 10-second
-    // timer against either Previous or Next being released — if both were
-    // held at boot and stay held for the whole window, the timer wins and
-    // we enter configuration mode. If either (or both) was never pressed,
-    // `wait_for_high` resolves immediately because the pin is already high,
-    // so normally this block completes in microseconds.
-    let entering_config_mode = !config.is_configured().unwrap_or(false) || {
-        let mut prev_input = Input::new(
-            hw.gpio_btn_previous.reborrow(),
-            InputConfig::default().with_pull(Pull::Up),
-        );
-        let mut next_input = Input::new(
-            hw.gpio_btn_next.reborrow(),
-            InputConfig::default().with_pull(Pull::Up),
-        );
-        matches!(
-            embassy_futures::select::select3(
-                prev_input.wait_for_high(),
-                next_input.wait_for_high(),
-                Timer::at(Instant::MIN + Duration::from_secs(10)),
-            )
-            .await,
-            embassy_futures::select::Either3::Third(_)
-        )
-    };
+    let boot_button_hold = check_boot_button_hold(
+        &mut hw.gpio_btn_refresh,
+        &mut hw.gpio_btn_previous,
+        &mut hw.gpio_btn_next,
+    )
+    .await;
 
-    if !entering_config_mode {
-        crate::normal_mode::run(hw, config).await
-    } else {
-        // Entering config mode is a deliberate reset of the device's
-        // "what's displayed" state — whatever URL was committed last
-        // cycle (and any pending redirect) is no longer relevant once
-        // the user has reconfigured.
-        crate::normal_mode::CURRENT_URL.clear();
-        crate::normal_mode::REDIRECT_URL.clear();
-        config_mode::run(hw, config).await
+    match boot_button_hold {
+        BootButtonHold::AllHeld => crate::test_mode::run(hw).await,
+        BootButtonHold::PrevNextHeld => config_mode::run(hw, config).await,
+        BootButtonHold::NoneHeld if !config.is_configured().unwrap_or(false) => {
+            config_mode::run(hw, config).await
+        }
+        BootButtonHold::NoneHeld => crate::normal_mode::run(hw, config).await,
     }
 }
