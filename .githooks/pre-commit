@@ -7,5 +7,5 @@ cargo fmt --check
 echo "Checking clippy for all binaries..."
 cargo clippy --bins -- -D warnings
 
-echo "Checking clippy for e1004 + disable_charger..."
-cargo clippy --bin e1004 --features disable_charger -- -D warnings
+echo "Checking clippy for all binaries + power_measurement..."
+cargo clippy --bins --features power_measurement -- -D warnings

@@ -26,6 +26,8 @@ use crate::rtc_persisted::RtcPersisted;
 use crate::sht40;
 use crate::single_shot_wifi;
 use crate::sy6974b;
+#[cfg(feature = "power_measurement")]
+use crate::text_box;
 use crate::uart::wait_for_tx_idle;
 use crate::url_util::{self, parse_http_url};
 
@@ -137,6 +139,8 @@ const DEFAULT_SUCCESS_SLEEP: Duration = Duration::from_secs(4 * 60 * 60);
 /// transient failure (WiFi glitch, server hiccup) recovers on the next
 /// wake without the user having to push a button.
 const DEFAULT_ERROR_SLEEP: Duration = Duration::from_secs(600);
+#[cfg(feature = "power_measurement")]
+const POWER_MEASUREMENT_SLEEP: Duration = Duration::from_secs(30);
 
 /// Optional server hint parsed from the `Refresh:` response header —
 /// carries the target `Instant` at which the next fetch should happen
@@ -400,6 +404,16 @@ where
                 )
             }
         };
+    #[cfg(feature = "power_measurement")]
+    let wakeup_requested = {
+        let _server_wakeup_requested = wakeup_requested;
+        println!("Power measurement mode: forcing 30 second wake interval");
+        embassy_time::Instant::now() + POWER_MEASUREMENT_SLEEP
+    };
+
+    #[cfg(feature = "power_measurement")]
+    let frame = add_power_measurement_overlay(frame, panel_width, panel_height);
+
     let FrameWithPalette { frame, palette } = frame;
 
     // --- Real refresh: reset aborts the (possibly still running) white refresh. ---
@@ -510,6 +524,29 @@ where
         ),
     ];
     crate::sleep::start_sleep(rtc, Some(wakeup_requested), wakeup_pins);
+}
+
+#[cfg(feature = "power_measurement")]
+fn add_power_measurement_overlay<C: PanelColor>(
+    frame: FrameWithPalette<C>,
+    width: usize,
+    height: usize,
+) -> FrameWithPalette<C> {
+    const TEXT: &str =
+        "Power measurement mode\nCharger disabled if supported\nWake interval: 30 seconds";
+
+    let FrameWithPalette { frame, mut palette } = frame;
+    let frame = text_box::draw_centered_on_frame(frame, width as u32, height as u32, TEXT);
+    add_color_if_missing(&mut palette, C::BLACK);
+    add_color_if_missing(&mut palette, C::WHITE);
+    FrameWithPalette { frame, palette }
+}
+
+#[cfg(feature = "power_measurement")]
+fn add_color_if_missing<C: PanelColor>(palette: &mut Vec<C>, color: C) {
+    if !palette.contains(&color) {
+        palette.push(color);
+    }
 }
 
 /// Parse a `Refresh: <secs>[; url=<url>]` header value into a

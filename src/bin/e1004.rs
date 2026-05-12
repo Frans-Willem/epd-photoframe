@@ -91,11 +91,12 @@ async fn main(spawner: Spawner) -> ! {
             .with_scl(peripherals.GPIO20)
             .into_async();
 
-    // PPK2 measurement mode: park the SY6974B charger in HIZ before
+    // Power-measurement mode: park the SY6974B charger in HIZ before
     // anything else runs so the system rail spends as little time as
     // possible drawing through VBUS. This must happen after I²C0 is up
-    // (the chip lives on this bus).
-    #[cfg(feature = "disable_charger")]
+    // (the chip lives on this bus). Other boards still support generic
+    // power-measurement behavior, but do not have an accessible SY6974B.
+    #[cfg(feature = "power_measurement")]
     let i2c0 = epd_photoframe::sy6974b::enter_measurement_mode(i2c0).await;
 
     let board = AppHardware {

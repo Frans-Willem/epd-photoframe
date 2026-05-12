@@ -82,7 +82,7 @@ Two candidate optimisations were investigated; neither shipped.
 The white pre-flash gives ~1 s of immediate visual feedback after a
 button press by kicking off an all-white panel refresh in parallel
 with WiFi fetch. PPK2 measurement of three runs (60 s cold-boot
-captures, `disable_charger` build, 3700 mV):
+captures, `power_measurement` build, 3700 mV):
 
 | Variant | Active-phase energy |
 |---------|---------------------|
@@ -138,18 +138,19 @@ Bench setup notes
 -----------------
 
 PPK2 in source-meter mode replaces the cell at the BAT pads. Build
-with the `disable_charger` Cargo feature, which parks the SY6974B in
-HIZ so the PPK2 sees the real load even with USB-C attached, and
-disables the chip's I²C watchdog so HIZ is sticky across resets:
+with the `power_measurement` Cargo feature, which parks the SY6974B in
+HIZ on E1004 so the PPK2 sees the real load even with USB-C attached,
+forces a 30-second wake interval, and marks the panel image so bench
+firmware is obvious:
 
 ```
-EXTRA_FEATURES=disable_charger RELEASE=1 ./run.sh e1004 /dev/ttyUSB0 /tmp/flash.log
+EXTRA_FEATURES=power_measurement RELEASE=1 ./run.sh e1004 /dev/ttyUSB0 /tmp/flash.log
 ```
 
 Drive the PPK2 from Nordic's nRF Connect for Desktop (Power
 Profiler app) for live current display and capture.
 
-**Bench gotcha:** with `disable_charger` active, EN_HIZ is sticky
+**Bench gotcha:** with `power_measurement` active on E1004, EN_HIZ is sticky
 across ESP32 resets and only clears when VBUS is removed and
 reapplied. Once firmware has run, the device only boots if the PPK2
 is sourcing on BAT — if the supply script exits between flashes, the

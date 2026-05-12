@@ -53,6 +53,16 @@ impl<C: PixelColor> Canvas<C> {
         }
     }
 
+    /// Wrap an existing row-major `width × height` frame buffer.
+    pub fn from_vec(width: u32, height: u32, pixels: Vec<C>) -> Self {
+        debug_assert_eq!(pixels.len(), (width as usize) * (height as usize));
+        Self {
+            pixels,
+            width,
+            height,
+        }
+    }
+
     /// Consume the canvas and return its underlying row-major pixel
     /// buffer.
     pub fn into_vec(self) -> Vec<C> {

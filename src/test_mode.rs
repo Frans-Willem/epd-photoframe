@@ -5,12 +5,6 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use embassy_time::Duration;
-use embedded_graphics::Drawable;
-use embedded_graphics::mono_font::ascii::FONT_10X20;
-use embedded_graphics::mono_font::{MonoFont, MonoTextStyle};
-use embedded_graphics::prelude::{Point, Primitive, Size};
-use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-use embedded_text::TextBox;
 use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::spi::master::Spi;
 use esp_hal::uart::UartRx;
@@ -20,6 +14,7 @@ use crate::app::AppContext;
 use crate::button::wait_for_press;
 use crate::canvas::Canvas;
 use crate::panel::{Panel, PanelColor};
+use crate::text_box;
 
 pub async fn run<P>(ctx: AppContext<P>) -> !
 where
@@ -240,48 +235,9 @@ fn draw_instructions<C: PanelColor>(
     height: u32,
     refresh_button_label: &str,
 ) {
-    const BOX_PADDING_PX: u32 = 24;
     let text = format!(
         "Test mode active\nDevice remains powered on\nPress {} to reboot",
         refresh_button_label
     );
-    let text_width = text_width_px(&text, &FONT_10X20);
-    let text_height = text_height_px(&text, &FONT_10X20);
-    let max_text_width = width.saturating_sub(2 * BOX_PADDING_PX);
-    let text_width = text_width.min(max_text_width);
-
-    let box_width = (text_width + 2 * BOX_PADDING_PX).min(width);
-    let box_height = (text_height + 2 * BOX_PADDING_PX).min(height);
-    let box_x = ((width - box_width) / 2) as i32;
-    let box_y = ((height - box_height) / 2) as i32;
-    let box_area = Rectangle::new(Point::new(box_x, box_y), Size::new(box_width, box_height));
-
-    let _ = box_area
-        .into_styled(PrimitiveStyle::with_fill(C::WHITE))
-        .draw(canvas);
-    let _ = box_area
-        .into_styled(PrimitiveStyle::with_stroke(C::BLACK, 2))
-        .draw(canvas);
-
-    let text_width = box_width.saturating_sub(2 * BOX_PADDING_PX);
-    let text_height = box_height.saturating_sub(2 * BOX_PADDING_PX);
-    let text_area = Rectangle::new(
-        Point::new(box_x + BOX_PADDING_PX as i32, box_y + BOX_PADDING_PX as i32),
-        Size::new(text_width, text_height),
-    );
-    let style = MonoTextStyle::new(&FONT_10X20, C::BLACK);
-    let _ = TextBox::new(&text, text_area, style).draw(canvas);
-}
-
-fn text_width_px(text: &str, font: &MonoFont<'_>) -> u32 {
-    let char_width = font.character_size.width;
-    text.lines()
-        .map(|line| line.chars().count() as u32 * char_width)
-        .max()
-        .unwrap_or(0)
-}
-
-fn text_height_px(text: &str, font: &MonoFont<'_>) -> u32 {
-    let line_count = text.lines().count().max(1) as u32;
-    line_count * font.character_size.height
+    text_box::draw_centered(canvas, width, height, &text);
 }
