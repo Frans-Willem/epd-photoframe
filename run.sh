@@ -61,7 +61,7 @@ if [[ "${RELEASE:-}" == "1" ]]; then
     release_flag="--release"
 fi
 # `EXTRA_FEATURES=foo,bar` env var passes extra cargo features — e.g.
-# `disable_charger` for PPK2 bench builds.
+# `power_measurement` for PPK2 bench builds.
 features=""
 if [[ -n "${EXTRA_FEATURES:-}" ]]; then
     features="--features ${EXTRA_FEATURES}"

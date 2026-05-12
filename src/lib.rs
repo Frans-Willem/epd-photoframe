@@ -22,5 +22,6 @@ pub mod single_shot_wifi;
 pub mod sleep;
 pub mod sy6974b;
 pub mod test_mode;
+pub mod text_box;
 pub mod uart;
 pub mod url_util;
