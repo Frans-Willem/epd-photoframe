@@ -15,6 +15,7 @@ use esp_hal::gpio::{Level, Output, OutputConfig};
 use esp_hal::spi::Mode as SpiMode;
 use esp_hal::spi::master::Config as SpiConfig;
 use esp_hal::spi::master::Spi;
+use esp_hal::uart::{Config as UartConfig, UartRx};
 
 extern crate alloc;
 
@@ -44,6 +45,10 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let (refresh_button_label, has_sy6974b) = ("Refresh button", true);
+    let uart_rx = UartRx::new(peripherals.UART0, UartConfig::default())
+        .unwrap()
+        .with_rx(peripherals.GPIO44)
+        .into_async();
 
     // --- Build the panel SPI bus and EPD driver (shared by both flows) ---
     let epd_spi_bus = Spi::new(
@@ -100,6 +105,7 @@ async fn main(spawner: Spawner) -> ! {
         led_pin: led_pin.degrade(),
         refresh_button_label,
         has_sy6974b,
+        uart_rx,
         spi_bus: epd_spi_bus,
         epd,
         i2c0,

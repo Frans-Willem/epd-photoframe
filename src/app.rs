@@ -9,6 +9,7 @@ use esp_hal::gpio::{AnyPin, Input, InputConfig, Level, Output, OutputConfig, Pin
 use esp_hal::spi::master::Spi;
 use esp_hal::system::SleepSource;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::uart::UartRx;
 use esp_println::println;
 
 use crate::buzzer::Buzzer;
@@ -74,6 +75,7 @@ pub struct AppHardware<P> {
     pub led_pin: AnyPin<'static>,
     pub refresh_button_label: &'static str,
     pub has_sy6974b: bool,
+    pub uart_rx: UartRx<'static, esp_hal::Async>,
     pub spi_bus: Spi<'static, esp_hal::Async>,
     pub epd: P,
     pub i2c0: esp_hal::i2c::master::I2c<'static, esp_hal::Async>,
@@ -98,6 +100,7 @@ pub struct AppContext<P> {
     pub wifi: esp_hal::peripherals::WIFI<'static>,
     pub refresh_button_label: &'static str,
     pub has_sy6974b: bool,
+    pub uart_rx: UartRx<'static, esp_hal::Async>,
 
     /// Sensor hardware used only by the normal refresh flow to populate
     /// battery / temperature / humidity / charger status URL parameters.
@@ -158,6 +161,7 @@ where
         led_pin,
         refresh_button_label,
         has_sy6974b,
+        uart_rx,
         spi_bus,
         epd,
         i2c0,
@@ -257,6 +261,7 @@ where
         wifi,
         refresh_button_label,
         has_sy6974b,
+        uart_rx,
         battery_enable: Output::new(battery_enable_pin, Level::Low, OutputConfig::default()),
         adc1,
         battery_sense,
