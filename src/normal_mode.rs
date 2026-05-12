@@ -140,7 +140,7 @@ const DEFAULT_SUCCESS_SLEEP: Duration = Duration::from_secs(4 * 60 * 60);
 /// wake without the user having to push a button.
 const DEFAULT_ERROR_SLEEP: Duration = Duration::from_secs(600);
 #[cfg(feature = "power_measurement")]
-const POWER_MEASUREMENT_SLEEP: Duration = Duration::from_secs(30);
+const POWER_MEASUREMENT_SLEEP: Duration = Duration::from_secs(60);
 
 /// Optional server hint parsed from the `Refresh:` response header —
 /// carries the target `Instant` at which the next fetch should happen
@@ -407,7 +407,7 @@ where
     #[cfg(feature = "power_measurement")]
     let wakeup_requested = {
         let _server_wakeup_requested = wakeup_requested;
-        println!("Power measurement mode: forcing 30 second wake interval");
+        println!("Power measurement mode: forcing 60 second wake interval");
         embassy_time::Instant::now() + POWER_MEASUREMENT_SLEEP
     };
 
@@ -533,7 +533,7 @@ fn add_power_measurement_overlay<C: PanelColor>(
     height: usize,
 ) -> FrameWithPalette<C> {
     const TEXT: &str =
-        "Power measurement mode\nCharger disabled if supported\nWake interval: 30 seconds";
+        "Power measurement mode\nCharger disabled if supported\nWake interval: 60 seconds";
 
     let FrameWithPalette { frame, mut palette } = frame;
     let frame = text_box::draw_centered_on_frame(frame, width as u32, height as u32, TEXT);

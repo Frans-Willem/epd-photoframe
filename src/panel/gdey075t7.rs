@@ -66,6 +66,7 @@ enum Command {
     PowerSetting = 0x01,           // PWR
     PowerOff = 0x02,               // POF
     PowerOn = 0x04,                // PON
+    DeepSleep = 0x07,              // DSLP; requires check byte 0xA5
     DataStartTransmission1 = 0x10, // DTM1 — 4-gray plane "high" bit
     DisplayRefresh = 0x12,         // DRF
     DataStartTransmission2 = 0x13, // DTM2 — 4-gray plane "low" bit
@@ -307,6 +308,10 @@ where
     }
 
     async fn disable(&mut self) -> Result<(), Self::Error> {
+        // On E1001 the 24-pin panel load-switch enable is tied to
+        // SCREEN_RST#. Holding reset low after the refresh drops that
+        // rail and fixes the ~90 µA E1001 deep-sleep excess.
+        self.rst.set_low().map_err(Gdey075t7Error::RSTError)?;
         Ok(())
     }
 
@@ -384,6 +389,7 @@ where
     async fn power_off(&mut self, spi: &mut SPI) -> Result<(), Self::Error> {
         self.command(spi, Command::PowerOff, []).await?;
         self.wait_until_idle().await?;
+        self.command(spi, Command::DeepSleep, [0xA5]).await?;
         Ok(())
     }
 
