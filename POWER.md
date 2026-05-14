@@ -27,20 +27,11 @@ leakage, charger/power-path quiescent current, or regulator differences.
 Expected battery life
 ---------------------
 
-| Device | Refresh interval | Active (mWh/day) | Sleep (mWh/day) | Total (mWh/day) | Battery life |
-|--------|------------------|------------------|-----------------|-----------------|--------------|
-| E1001 | **24 h (1/day)** | 0.99 | 27.08 | **28.08** | **~264 days (~8.7 months)** |
-| E1001 | 12 h (2/day) | 1.98 | 27.08 | 29.07 | ~255 days (~8.4 months) |
-| E1001 | 6 h (4/day) | 3.97 | 27.08 | 31.05 | ~238 days (~7.8 months) |
-| E1001 | 1 h (24/day) | 23.80 | 27.08 | 50.88 | ~145 days (~4.8 months) |
-| E1002 | **24 h (1/day)** | 3.05 | 26.46 | **29.50** | **~251 days (~8.2 months)** |
-| E1002 | 12 h (2/day) | 6.10 | 26.46 | 32.55 | ~227 days (~7.5 months) |
-| E1002 | 6 h (4/day) | 12.19 | 26.46 | 38.65 | ~192 days (~6.3 months) |
-| E1002 | 1 h (24/day) | 73.15 | 26.46 | 99.61 | ~74 days (~2.4 months) |
-| E1004 | **24 h (1/day)** | 9.76 | 22.23 | **31.99** | **~578 days (~19 months)** |
-| E1004 | 12 h (2/day) | 19.52 | 22.23 | 41.75 | ~443 days (~14.6 months) |
-| E1004 | 6 h (4/day) | 39.03 | 22.23 | 61.26 | ~302 days (~9.9 months) |
-| E1004 | 1 h (24/day) | 234.20 | 22.23 | 256.43 | ~72 days (~2.4 months) |
+| Device | 24 h / 1 day | 12 h | 6 h | 1 h |
+|--------|--------------|------|-----|-----|
+| E1001 | **~264 days (~8.7 months)** | ~255 days (~8.4 months) | ~238 days (~7.8 months) | ~145 days (~4.8 months) |
+| E1002 | **~251 days (~8.2 months)** | ~227 days (~7.5 months) | ~192 days (~6.3 months) | ~74 days (~2.4 months) |
+| E1004 | **~578 days (~19 months)** | ~443 days (~14.6 months) | ~302 days (~9.9 months) | ~72 days (~2.4 months) |
 
 Sleep-current fixes
 -------------------
