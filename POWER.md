@@ -105,7 +105,9 @@ Active refresh averages **~255.68 mA for ~37.11 s**, or
 
 Build with the `power_measurement` Cargo feature for bench captures.
 It parks the SY6974B in HIZ on E1004, forces a 60-second wake interval,
-and marks the panel image so bench firmware is obvious:
+and marks the panel image so bench firmware is obvious. HIZ lets you
+measure E1004 power at the battery connector while USB serial remains
+attached; on E1001 / E1002, disconnect USB for power measurements.
 
 ```
 EXTRA_FEATURES=power_measurement RELEASE=1 ./run.sh e1004 /dev/ttyUSB0 /tmp/flash.log
