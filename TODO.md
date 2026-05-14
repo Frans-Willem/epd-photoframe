@@ -1,5 +1,13 @@
 # TODO
 
+## Possible TRMNL compatibility
+
+TRMNL compatibility might be useful eventually, but it is not a current
+goal and may never be implemented. If we do pick it up, decide first
+whether compatibility means speaking a TRMNL-compatible HTTP endpoint,
+matching TRMNL button semantics, reusing any panel-waveform behaviour,
+or some smaller subset of those.
+
 ## Static-IP + explicit WPA auth-type configuration
 
 The current NVS schema stores just the three fields the portal form
