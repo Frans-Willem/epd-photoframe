@@ -18,6 +18,12 @@ Sleep dominates normal daily use. At one refresh per day, active
 energy is only ~4% of E1001's budget, ~10% of E1002's budget, and
 ~31% of E1004's budget.
 
+E1001 / E1002 still sleep about **48-55 µA** higher than E1004. We did
+not find a firmware cause after checking ADC shutdown, panel reset
+state, and panel-controller sleep. The remaining difference is
+suspected to be hardware-related: board pull networks, panel/FPC
+leakage, charger/power-path quiescent current, or regulator differences.
+
 Expected battery life
 ---------------------
 
