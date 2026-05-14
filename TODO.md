@@ -11,10 +11,12 @@ or some smaller subset of those.
 ## SD-card image source
 
 Possible future work: load and display images or folders from SD card
-instead of always fetching from HTTP. Before implementing this, decide
-whether the SD card stores already-dithered panel PNGs, server-style
-source photos that still need off-device processing, or a small set of
-diagnostic/test images only.
+instead of always fetching from HTTP. The SD card should store
+already-sized, already-dithered panel images; dithering server-style
+source photos on-device is not feasible on the E1004 because the
+1200x1600 panel does not leave enough memory for that pipeline. Before
+implementing this, decide whether SD-card support is for normal
+preprocessed photo rotation, diagnostic/test images only, or both.
 
 ## Partial refresh / unchanged-region refresh
 
