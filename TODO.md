@@ -8,6 +8,25 @@ whether compatibility means speaking a TRMNL-compatible HTTP endpoint,
 matching TRMNL button semantics, reusing any panel-waveform behaviour,
 or some smaller subset of those.
 
+## SD-card image source
+
+Possible future work: load and display images or folders from SD card
+instead of always fetching from HTTP. Before implementing this, decide
+whether the SD card stores already-dithered panel PNGs, server-style
+source photos that still need off-device processing, or a small set of
+diagnostic/test images only.
+
+## Partial refresh / unchanged-region refresh
+
+Possible future work: unless a refresh was explicitly triggered by the
+Refresh button, refresh only the portion of the screen that actually
+changed. This depends on what each panel/controller can do safely:
+E1001 has an established partial-update path for black/white fast
+refresh, while the Spectra 6 panels may require full-panel refreshes for
+good colour quality and ghosting control. If this is revisited, start by
+checking the panel datasheets and whether retaining enough previous-frame
+state in RTC RAM or flash is worth the complexity.
+
 ## Static-IP + explicit WPA auth-type configuration
 
 The current NVS schema stores just the three fields the portal form
