@@ -66,7 +66,9 @@ async fn main_loop<P>(
     )
     .await;
 
-    println!("Test mode ready. Send `COLOR number` over UART, or press Refresh to reboot.");
+    println!(
+        "Test mode ready. Send `COLOR number` or `BAYER counts...` over UART, or press Refresh to reboot."
+    );
     loop {
         match read_command(uart_rx).await {
             TestCommand::Color(index) => {
@@ -92,6 +94,37 @@ async fn main_loop<P>(
                         colors.len()
                     );
                 }
+            }
+            TestCommand::Bayer(counts) => {
+                if counts.len() != colors.len() {
+                    println!(
+                        "BAYER expects {} counts, one for each panel color; got {}",
+                        colors.len(),
+                        counts.len()
+                    );
+                    continue;
+                }
+                let total: usize = counts.iter().sum();
+                if total != 16 {
+                    println!("BAYER counts must sum to 16; got {}", total);
+                    continue;
+                }
+
+                println!("Rendering BAYER {:?}", counts);
+                render_test_frame::<P>(
+                    spi_bus,
+                    epd,
+                    render_bayer::<P::Color>(
+                        P::WIDTH,
+                        P::HEIGHT,
+                        &colors,
+                        &counts,
+                        refresh_button_label,
+                    ),
+                    "bayer pattern",
+                )
+                .await;
+                println!("Test mode ready.");
             }
         }
     }
@@ -137,6 +170,44 @@ fn render_solid_color<C: PanelColor>(
     canvas.into_vec()
 }
 
+fn render_bayer<C: PanelColor>(
+    width: usize,
+    height: usize,
+    colors: &[C],
+    counts: &[usize],
+    refresh_button_label: &str,
+) -> Vec<C> {
+    const BAYER_4X4: [usize; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    const BAYER_CELL_SCALE: usize = 1;
+
+    let pattern = BAYER_4X4.map(|rank| color_for_bayer_rank(colors, counts, rank));
+
+    let mut canvas = Canvas::new_with(width as u32, height as u32, |x, y| {
+        let x = x as usize / BAYER_CELL_SCALE;
+        let y = y as usize / BAYER_CELL_SCALE;
+        let cell = (y % 4) * 4 + (x % 4);
+        pattern[cell]
+    });
+    draw_instructions(
+        &mut canvas,
+        width as u32,
+        height as u32,
+        refresh_button_label,
+    );
+    canvas.into_vec()
+}
+
+fn color_for_bayer_rank<C: PanelColor>(colors: &[C], counts: &[usize], rank: usize) -> C {
+    let mut threshold = 0;
+    for (&color, &count) in colors.iter().zip(counts) {
+        threshold += count;
+        if rank < threshold {
+            return color;
+        }
+    }
+    C::WHITE
+}
+
 async fn render_test_frame<P>(
     spi_bus: &mut Spi<'static, esp_hal::Async>,
     epd: &mut P,
@@ -173,6 +244,7 @@ async fn render_test_frame<P>(
 
 enum TestCommand {
     Color(usize),
+    Bayer(Vec<usize>),
 }
 
 async fn read_command(uart_rx: &mut UartRx<'static, esp_hal::Async>) -> TestCommand {
@@ -221,9 +293,17 @@ async fn read_byte(uart_rx: &mut UartRx<'static, esp_hal::Async>) -> Option<u8> 
 
 fn parse_command(line: &str) -> Option<TestCommand> {
     let mut parts = line.split_whitespace();
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(command), Some(index), None) if command.eq_ignore_ascii_case("COLOR") => {
+    match parts.next()? {
+        command if command.eq_ignore_ascii_case("COLOR") => {
+            let index = parts.next()?;
+            if parts.next().is_some() {
+                return None;
+            }
             index.parse().ok().map(TestCommand::Color)
+        }
+        command if command.eq_ignore_ascii_case("BAYER") => {
+            let counts: Result<Vec<usize>, _> = parts.map(str::parse).collect();
+            counts.ok().map(TestCommand::Bayer)
         }
         _ => None,
     }
