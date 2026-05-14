@@ -30,8 +30,6 @@ Panel references:
 - E1002 GDEP073E01: https://www.good-display.com/blank7.html?productId=533
 - E1004 T133A01 datasheet from Seeed:
   https://files.seeedstudio.com/wiki/Other_Display/1330-E6-epaper/13.3_E6_eInk_Display_module_Datasheet.pdf
-- Related Good Display 13.3 inch Spectra 6 panel, GDEP133C02:
-  https://www.good-display.com/product/559.html
 
 The E1004 panel is a 13.3 inch 1200x1600 Spectra 6 panel driven through
 two controllers. See `src/panel/t133a01.rs` for the current command
