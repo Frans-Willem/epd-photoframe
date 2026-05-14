@@ -3,7 +3,7 @@
 Full-fledged photo frame firmware for Seeed reTerminal E1001, E1002, and
 E1004 e-paper devices.
 
-epd-photoframe turns the reTerminal E100x boards into battery-powered
+epd-photoframe turns the reTerminal E100x devices into battery-powered
 digital photo frames. The device wakes up, connects to WiFi, fetches one
 already-prepared PNG image, refreshes the e-paper panel, and goes back to
 deep sleep until the next refresh.
@@ -152,8 +152,8 @@ and battery-life estimates.
 
 Panel references, schematics, and lower-level hardware notes live in
 [HARDWARE.md](./HARDWARE.md). They are useful when changing panel
-drivers or investigating board behaviour, but are not needed for normal
-use.
+drivers or investigating hardware behaviour, but are not needed for
+normal use.
 
 ## A note on LLM use
 
