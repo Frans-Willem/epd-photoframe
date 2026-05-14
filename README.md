@@ -157,12 +157,12 @@ use.
 
 ## A note on LLM use
 
-I made heavy use of Claude while building this. I was closely involved
-throughout - every change Claude proposed was reviewed before it landed,
-and I personally stand by the quality of the code in this repo. What an
-LLM gave me was time: enough of it to take this project from "works on
-my desk" to something polished enough for other people to use, which I
-wouldn't otherwise have done as a side project.
+I made heavy use of Anthropic Claude and OpenAI Codex while building
+this. I was closely involved throughout - every change they proposed was
+reviewed before it landed, and I personally stand by the quality of the
+code in this repo. What LLMs gave me was time: enough of it to take this
+project from "works on my desk" to something polished enough for other
+people to use, which I wouldn't otherwise have done as a side project.
 
 That said, plenty of suggestions Claude made along the way were
 nonsense, and I would not trust an LLM to write code unsupervised after
