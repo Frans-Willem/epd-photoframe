@@ -150,15 +150,12 @@ Pre-flash costs **~0.4 mWh per cycle (~4-5%)**. At 1/day on the
 ### Network phase
 
 E1004 WiFi assoc + DHCP + HTTP fetch is roughly t=2-10 s in the cycle
-waveform, ~250 mA mean, or **~2.05 mWh per cycle**. Plausible levers:
+waveform, ~250 mA mean, or **~2.05 mWh per cycle**. These measurements
+already include fast WiFi reconnect using the cached BSSID/channel
+hint. Remaining plausible levers:
 
 | Lever | Saved/cycle | Notes |
 |-------|-------------|-------|
 | Halve image size | ~0.4 mWh | Server-side PNG re-encode; 547 KB at 4-color indexed is ~2.3 bpp vs ~2 bpp floor. |
-| Fast WiFi reconnect | ~0.25-0.5 mWh | Cache BSSID + channel in NVS to skip full scan. |
 | Static IP | ~0.26 mWh | Brittle: LAN reorg breaks the device until reflashed. |
 | HTTP `If-Modified-Since` / `ETag` -> 304 | ~1.5 mWh | Only when the server actually returns 304. |
-
-Fast WiFi reconnect is the one item worth keeping in mind if a cheap
-implementation surfaces. Bench it with 5+ cycles per variant against a
-stable AP; single-cycle deltas are below run-to-run noise.
