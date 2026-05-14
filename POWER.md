@@ -27,8 +27,8 @@ leakage, charger/power-path quiescent current, or regulator differences.
 Expected battery life
 ---------------------
 
-| Device | 24 h / 1 day | 12 h | 6 h | 1 h |
-|--------|--------------|------|-----|-----|
+| Wake-up interval | 24 h | 12 h | 6 h | 1 h |
+|------------------|------|------|-----|-----|
 | E1001 | **~264 days (~8.7 months)** | ~255 days (~8.4 months) | ~238 days (~7.8 months) | ~145 days (~4.8 months) |
 | E1002 | **~251 days (~8.2 months)** | ~227 days (~7.5 months) | ~192 days (~6.3 months) | ~74 days (~2.4 months) |
 | E1004 | **~578 days (~19 months)** | ~443 days (~14.6 months) | ~302 days (~9.9 months) | ~72 days (~2.4 months) |
