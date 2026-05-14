@@ -1,2 +1,0 @@
-Speeding up booting up from deep sleep:
-https://esp32.com/viewtopic.php?t=30954
